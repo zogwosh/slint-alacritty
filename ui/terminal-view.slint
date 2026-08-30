@@ -1,0 +1,284 @@
+export struct TerminalCell {
+    text: string,
+    foreground: color,
+    background: color,
+    column: int,
+    width-in-columns: int,
+    bold: bool,
+    italic: bool,
+    underline-style: int,
+    underline-decoration: string,
+    strikeout: bool,
+    hidden: bool,
+}
+
+export struct TerminalRow {
+    cells: [TerminalCell],
+}
+
+export component TerminalView inherits Rectangle {
+    background: #0d1117;
+
+    in property <[TerminalRow]> rows;
+    in property <int> cursor-column;
+    in property <int> cursor-row;
+    in property <bool> cursor-visible;
+    in property <int> cursor-shape;
+    in property <bool> cursor-blinking;
+    in property <bool> terminal-active: true;
+    in property <string> exit-message;
+    out property <length> cell-width: font-probe.preferred-width / 10;
+    out property <length> cell-height: 20px;
+    out property <int> column-count: max(2, floor(self.width / self.cell-width));
+    out property <int> row-count: max(1, floor(self.height / self.cell-height));
+
+    callback key-input(string, bool, bool, bool, bool);
+    callback viewport-resized(int, int);
+    callback mouse-input(int, int, int, int, bool, bool, bool, bool);
+    callback mouse-scroll(int, int, float, bool, bool, bool);
+    private property <bool> altgr-active;
+    private property <bool> cursor-phase: true;
+    private property <bool> mouse-shift;
+    private property <bool> mouse-alt;
+    private property <bool> mouse-control;
+
+    changed column-count => {
+        root.viewport-resized(root.column-count, root.row-count);
+    }
+    changed row-count => {
+        root.viewport-resized(root.column-count, root.row-count);
+    }
+
+    terminal-focus := FocusScope {
+        width: 100%;
+        height: 100%;
+        focus-on-click: true;
+
+        key-pressed(event) => {
+            if (event.text == Key.AltGr) {
+                root.altgr-active = true;
+            } else if (root.terminal-active) {
+                root.key-input(
+                    event.text,
+                    event.modifiers.control,
+                    event.modifiers.alt,
+                    event.modifiers.shift,
+                    root.altgr-active,
+                );
+            }
+            accept
+        }
+
+        key-released(event) => {
+            if (event.text == Key.AltGr) {
+                root.altgr-active = false;
+                accept
+            } else {
+                reject
+            }
+        }
+
+        for row[row-index] in root.rows : Rectangle {
+            y: row-index * root.cell-height;
+            width: parent.width;
+            height: root.cell-height;
+            clip: true;
+
+            for cell in row.cells : Rectangle {
+                x: cell.column * root.cell-width;
+                width: cell.width-in-columns * root.cell-width;
+                height: root.cell-height;
+                background: cell.background;
+                clip: true;
+
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: cell.text;
+                    color: cell.foreground;
+                    visible: !cell.hidden;
+                    font-family: "Cascadia Mono";
+                    font-size: 15px;
+                    font-weight: cell.bold ? 700 : 400;
+                    font-italic: cell.italic;
+                    vertical-alignment: center;
+                    overflow: clip;
+                }
+
+                if cell.underline-style == 1 : Rectangle {
+                    y: parent.height - 1px;
+                    width: parent.width;
+                    height: 1px;
+                    background: cell.foreground;
+                }
+
+                if cell.underline-style == 2 : Rectangle {
+                    y: parent.height - 3px;
+                    width: parent.width;
+                    height: 1px;
+                    background: cell.foreground;
+
+                    Rectangle {
+                        y: 2px;
+                        width: parent.width;
+                        height: 1px;
+                        background: cell.foreground;
+                    }
+                }
+
+                if cell.underline-style >= 3 : Text {
+                    y: parent.height - 9px;
+                    width: parent.width;
+                    height: 9px;
+                    text: cell.underline-decoration;
+                    color: cell.foreground;
+                    font-family: "Cascadia Mono";
+                    font-size: 8px;
+                    vertical-alignment: bottom;
+                    overflow: clip;
+                }
+
+                if cell.strikeout : Rectangle {
+                    y: parent.height / 2;
+                    width: parent.width;
+                    height: 1px;
+                    background: cell.foreground;
+                }
+            }
+        }
+
+        font-probe := Text {
+            visible: false;
+            text: "0000000000";
+            font-family: "Cascadia Mono";
+            font-size: 15px;
+        }
+
+        if root.cursor-visible && root.cursor-phase : Rectangle {
+            x: root.cursor-column * root.cell-width;
+            y: root.cursor-row * root.cell-height;
+            width: root.cell-width;
+            height: root.cell-height;
+            background: transparent;
+
+            if root.cursor-shape == 0 : Rectangle {
+                width: parent.width;
+                height: parent.height;
+                background: #99e6edf3;
+            }
+
+            if root.cursor-shape == 1 : Rectangle {
+                y: parent.height - 2px;
+                width: parent.width;
+                height: 2px;
+                background: #e6edf3;
+            }
+
+            if root.cursor-shape == 2 : Rectangle {
+                width: 2px;
+                height: parent.height;
+                background: #e6edf3;
+            }
+
+            if root.cursor-shape == 3 : Rectangle {
+                width: parent.width;
+                height: parent.height;
+                border-width: 1px;
+                border-color: #e6edf3;
+                background: transparent;
+            }
+        }
+
+        if !root.terminal-active : Rectangle {
+            x: 8px;
+            y: parent.height - 28px;
+            width: min(parent.width - 16px, exit-label.preferred-width + 16px);
+            height: 22px;
+            border-radius: 4px;
+            background: #d9303742;
+
+            exit-label := Text {
+                x: 8px;
+                width: parent.width - 16px;
+                height: parent.height;
+                text: root.exit-message;
+                color: #b1bac4;
+                font-family: "Cascadia Mono";
+                font-size: 12px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+
+
+        mouse-area := TouchArea {
+            width: 100%;
+            height: 100%;
+            mouse-cursor: text;
+
+            pointer-event(event) => {
+                root.mouse-shift = event.modifiers.shift;
+                root.mouse-alt = event.modifiers.alt;
+                root.mouse-control = event.modifiers.control;
+                if (event.kind == PointerEventKind.down) {
+                    terminal-focus.focus();
+                }
+                root.mouse-input(
+                    min(root.column-count - 1, max(0, floor(self.mouse-x / root.cell-width))),
+                    min(root.row-count - 1, max(0, floor(self.mouse-y / root.cell-height))),
+                    event.button == PointerEventButton.left ? 0
+                        : event.button == PointerEventButton.middle ? 1
+                        : event.button == PointerEventButton.right ? 2 : 3,
+                    event.kind == PointerEventKind.down ? 0
+                        : event.kind == PointerEventKind.up ? 1
+                        : event.kind == PointerEventKind.move ? 2 : 3,
+                    event.modifiers.shift,
+                    event.modifiers.alt,
+                    event.modifiers.control,
+                    (self.mouse-x - floor(self.mouse-x / root.cell-width) * root.cell-width)
+                        >= root.cell-width / 2,
+                );
+            }
+
+            double-clicked() => {
+                root.mouse-input(
+                    min(root.column-count - 1, max(0, floor(self.mouse-x / root.cell-width))),
+                    min(root.row-count - 1, max(0, floor(self.mouse-y / root.cell-height))),
+                    0, 4, root.mouse-shift, root.mouse-alt, root.mouse-control,
+                    (self.mouse-x - floor(self.mouse-x / root.cell-width) * root.cell-width)
+                        >= root.cell-width / 2,
+                );
+            }
+
+            scroll-event(event) => {
+                root.mouse-scroll(
+                    min(root.column-count - 1, max(0, floor(self.mouse-x / root.cell-width))),
+                    min(root.row-count - 1, max(0, floor(self.mouse-y / root.cell-height))),
+                    event.delta-y / root.cell-height,
+                    event.modifiers.shift,
+                    event.modifiers.alt,
+                    event.modifiers.control,
+                );
+                accept
+            }
+        }
+    }
+
+    Timer {
+        interval: 500ms;
+        running: root.cursor-visible && root.cursor-blinking && root.terminal-active;
+        triggered() => {
+            root.cursor-phase = !root.cursor-phase;
+        }
+    }
+
+    changed cursor-column => { root.cursor-phase = true; }
+    changed cursor-row => { root.cursor-phase = true; }
+    changed cursor-visible => { root.cursor-phase = true; }
+    changed terminal-active => { root.cursor-phase = true; }
+
+    init => {
+        terminal-focus.focus();
+        root.viewport-resized(root.column-count, root.row-count);
+    }
+}

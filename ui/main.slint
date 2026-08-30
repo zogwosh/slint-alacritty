@@ -1,0 +1,54 @@
+export { TerminalCell, TerminalRow } from "terminal-view.slint";
+import { TerminalRow, TerminalView } from "terminal-view.slint";
+
+export component MainWindow inherits Window {
+    title: root.terminal-title;
+    width: 800px;
+    height: 480px;
+    background: #0d1117;
+
+    in property <[TerminalRow]> rows;
+    in property <string> terminal-title: "Slint Terminal";
+    in property <int> cursor-column;
+    in property <int> cursor-row;
+    in property <bool> cursor-visible;
+    in property <int> cursor-shape;
+    in property <bool> cursor-blinking;
+    in property <bool> terminal-active: true;
+    in property <string> exit-message;
+    callback key-input(string, bool, bool, bool, bool);
+    callback viewport-resized(int, int);
+    callback frame-ready;
+    callback mouse-input(int, int, int, int, bool, bool, bool, bool);
+    callback mouse-scroll(int, int, float, bool, bool, bool);
+
+    out property <length> cell-width: terminal-view.cell-width;
+    out property <length> cell-height: terminal-view.cell-height;
+    out property <int> viewport-columns: terminal-view.column-count;
+    out property <int> viewport-rows: terminal-view.row-count;
+
+    terminal-view := TerminalView {
+        width: 100%;
+        height: 100%;
+        rows: root.rows;
+        cursor-column: root.cursor-column;
+        cursor-row: root.cursor-row;
+        cursor-visible: root.cursor-visible;
+        cursor-shape: root.cursor-shape;
+        cursor-blinking: root.cursor-blinking;
+        terminal-active: root.terminal-active;
+        exit-message: root.exit-message;
+        key-input(text, control, alt, shift, altgr) => {
+            root.key-input(text, control, alt, shift, altgr);
+        }
+        viewport-resized(columns, rows) => {
+            root.viewport-resized(columns, rows);
+        }
+        mouse-input(column, row, button, action, shift, alt, control, right-half) => {
+            root.mouse-input(column, row, button, action, shift, alt, control, right-half);
+        }
+        mouse-scroll(column, row, lines, shift, alt, control) => {
+            root.mouse-scroll(column, row, lines, shift, alt, control);
+        }
+    }
+}
