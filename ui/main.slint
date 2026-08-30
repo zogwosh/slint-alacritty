@@ -1,5 +1,4 @@
-export { TerminalCell, TerminalRow } from "terminal-view.slint";
-import { TerminalRow, TerminalView } from "terminal-view.slint";
+import { TerminalView } from "terminal-view.slint";
 
 export component MainWindow inherits Window {
     title: root.terminal-title;
@@ -7,13 +6,8 @@ export component MainWindow inherits Window {
     height: 480px;
     background: #0d1117;
 
-    in property <[TerminalRow]> rows;
+    in property <image> terminal-frame;
     in property <string> terminal-title: "Slint Terminal";
-    in property <int> cursor-column;
-    in property <int> cursor-row;
-    in property <bool> cursor-visible;
-    in property <int> cursor-shape;
-    in property <bool> cursor-blinking;
     in property <bool> terminal-active: true;
     in property <string> exit-message;
     callback key-input(string, bool, bool, bool, bool);
@@ -30,12 +24,7 @@ export component MainWindow inherits Window {
     terminal-view := TerminalView {
         width: 100%;
         height: 100%;
-        rows: root.rows;
-        cursor-column: root.cursor-column;
-        cursor-row: root.cursor-row;
-        cursor-visible: root.cursor-visible;
-        cursor-shape: root.cursor-shape;
-        cursor-blinking: root.cursor-blinking;
+        frame: root.terminal-frame;
         terminal-active: root.terminal-active;
         exit-message: root.exit-message;
         key-input(text, control, alt, shift, altgr) => {

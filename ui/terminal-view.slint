@@ -1,30 +1,7 @@
-export struct TerminalCell {
-    text: string,
-    foreground: color,
-    background: color,
-    column: int,
-    width-in-columns: int,
-    bold: bool,
-    italic: bool,
-    underline-style: int,
-    underline-decoration: string,
-    strikeout: bool,
-    hidden: bool,
-}
-
-export struct TerminalRow {
-    cells: [TerminalCell],
-}
-
 export component TerminalView inherits Rectangle {
     background: #0d1117;
 
-    in property <[TerminalRow]> rows;
-    in property <int> cursor-column;
-    in property <int> cursor-row;
-    in property <bool> cursor-visible;
-    in property <int> cursor-shape;
-    in property <bool> cursor-blinking;
+    in property <image> frame;
     in property <bool> terminal-active: true;
     in property <string> exit-message;
     out property <length> cell-width: font-probe.preferred-width / 10;
@@ -37,7 +14,6 @@ export component TerminalView inherits Rectangle {
     callback mouse-input(int, int, int, int, bool, bool, bool, bool);
     callback mouse-scroll(int, int, float, bool, bool, bool);
     private property <bool> altgr-active;
-    private property <bool> cursor-phase: true;
     private property <bool> mouse-shift;
     private property <bool> mouse-alt;
     private property <bool> mouse-control;
@@ -78,73 +54,11 @@ export component TerminalView inherits Rectangle {
             }
         }
 
-        for row[row-index] in root.rows : Rectangle {
-            y: row-index * root.cell-height;
-            width: parent.width;
-            height: root.cell-height;
-            clip: true;
-
-            for cell in row.cells : Rectangle {
-                x: cell.column * root.cell-width;
-                width: cell.width-in-columns * root.cell-width;
-                height: root.cell-height;
-                background: cell.background;
-                clip: true;
-
-                Text {
-                    width: parent.width;
-                    height: parent.height;
-                    text: cell.text;
-                    color: cell.foreground;
-                    visible: !cell.hidden;
-                    font-family: "Cascadia Mono";
-                    font-size: 15px;
-                    font-weight: cell.bold ? 700 : 400;
-                    font-italic: cell.italic;
-                    vertical-alignment: center;
-                    overflow: clip;
-                }
-
-                if cell.underline-style == 1 : Rectangle {
-                    y: parent.height - 1px;
-                    width: parent.width;
-                    height: 1px;
-                    background: cell.foreground;
-                }
-
-                if cell.underline-style == 2 : Rectangle {
-                    y: parent.height - 3px;
-                    width: parent.width;
-                    height: 1px;
-                    background: cell.foreground;
-
-                    Rectangle {
-                        y: 2px;
-                        width: parent.width;
-                        height: 1px;
-                        background: cell.foreground;
-                    }
-                }
-
-                if cell.underline-style >= 3 : Text {
-                    y: parent.height - 9px;
-                    width: parent.width;
-                    height: 9px;
-                    text: cell.underline-decoration;
-                    color: cell.foreground;
-                    font-family: "Cascadia Mono";
-                    font-size: 8px;
-                    vertical-alignment: bottom;
-                    overflow: clip;
-                }
-
-                if cell.strikeout : Rectangle {
-                    y: parent.height / 2;
-                    width: parent.width;
-                    height: 1px;
-                    background: cell.foreground;
-                }
-            }
+        Image {
+            width: 100%;
+            height: 100%;
+            source: root.frame;
+            image-fit: fill;
         }
 
         font-probe := Text {
@@ -152,41 +66,6 @@ export component TerminalView inherits Rectangle {
             text: "0000000000";
             font-family: "Cascadia Mono";
             font-size: 15px;
-        }
-
-        if root.cursor-visible && root.cursor-phase : Rectangle {
-            x: root.cursor-column * root.cell-width;
-            y: root.cursor-row * root.cell-height;
-            width: root.cell-width;
-            height: root.cell-height;
-            background: transparent;
-
-            if root.cursor-shape == 0 : Rectangle {
-                width: parent.width;
-                height: parent.height;
-                background: #99e6edf3;
-            }
-
-            if root.cursor-shape == 1 : Rectangle {
-                y: parent.height - 2px;
-                width: parent.width;
-                height: 2px;
-                background: #e6edf3;
-            }
-
-            if root.cursor-shape == 2 : Rectangle {
-                width: 2px;
-                height: parent.height;
-                background: #e6edf3;
-            }
-
-            if root.cursor-shape == 3 : Rectangle {
-                width: parent.width;
-                height: parent.height;
-                border-width: 1px;
-                border-color: #e6edf3;
-                background: transparent;
-            }
         }
 
         if !root.terminal-active : Rectangle {
@@ -263,19 +142,6 @@ export component TerminalView inherits Rectangle {
             }
         }
     }
-
-    Timer {
-        interval: 500ms;
-        running: root.cursor-visible && root.cursor-blinking && root.terminal-active;
-        triggered() => {
-            root.cursor-phase = !root.cursor-phase;
-        }
-    }
-
-    changed cursor-column => { root.cursor-phase = true; }
-    changed cursor-row => { root.cursor-phase = true; }
-    changed cursor-visible => { root.cursor-phase = true; }
-    changed terminal-active => { root.cursor-phase = true; }
 
     init => {
         terminal-focus.focus();
