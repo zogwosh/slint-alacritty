@@ -81,6 +81,7 @@ pub(super) fn run_worker(
                     let _ = clipboard.set_text(text);
                 }
             }
+            Some(WorkerMessage::SelectAll) => backend.select_all(),
             Some(WorkerMessage::ForceFullRedraw) => {
                 backend.request_full_redraw();
                 frame_pending = true;
@@ -131,6 +132,9 @@ fn publish_frame(latest_frame: &Mutex<Option<FramePatch>>, mut incoming: FramePa
     }
     pending.changed_rows.sort_unstable_by_key(|row| row.row);
     pending.full_redraw |= incoming.full_redraw;
+    if incoming.full_redraw_reason.is_some() {
+        pending.full_redraw_reason = incoming.full_redraw_reason;
+    }
     pending.cursor = incoming.cursor;
     if incoming.title.is_some() {
         pending.title = incoming.title;
@@ -153,6 +157,7 @@ mod tests {
             columns: 80,
             rows: 24,
             full_redraw: false,
+            full_redraw_reason: None,
             changed_rows: changed_rows
                 .iter()
                 .map(|row| RowPatch {
@@ -208,6 +213,23 @@ mod tests {
                 .exit_message
                 .as_deref(),
             Some("Process exited with code 7")
+        );
+    }
+
+    #[test]
+    fn mailbox_retains_latest_full_redraw_reason() {
+        use crate::terminal::FullRedrawReason;
+
+        let slot = Mutex::new(None);
+        let mut full = frame(0, &[0]);
+        full.full_redraw = true;
+        full.full_redraw_reason = Some(FullRedrawReason::Resize);
+        publish_frame(&slot, full);
+        publish_frame(&slot, frame(0, &[1]));
+
+        assert_eq!(
+            slot.lock().unwrap().as_ref().unwrap().full_redraw_reason,
+            Some(FullRedrawReason::Resize)
         );
     }
 }

@@ -76,6 +76,7 @@ pub(super) enum WorkerMessage {
     Mouse(MouseInput),
     MouseScroll(MouseScrollInput),
     CopySelection,
+    SelectAll,
     ForceFullRedraw,
     Render,
     Shutdown,

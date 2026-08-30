@@ -42,10 +42,18 @@ pub(crate) struct FramePatch {
     pub(crate) columns: usize,
     pub(crate) rows: usize,
     pub(crate) full_redraw: bool,
+    pub(crate) full_redraw_reason: Option<FullRedrawReason>,
     pub(crate) changed_rows: Vec<RowPatch>,
     pub(crate) cursor: CursorPatch,
     pub(crate) title: Option<String>,
     pub(crate) exit_message: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FullRedrawReason {
+    TerminalDamage,
+    RendererRequest,
+    Resize,
 }
 
 pub(super) fn capture_frame<T: EventListener>(
@@ -53,23 +61,28 @@ pub(super) fn capture_frame<T: EventListener>(
     columns: usize,
     rows: usize,
     generation: u64,
-    force_full_redraw: bool,
+    forced_full_redraw: Option<FullRedrawReason>,
+    extra_dirty_rows: &[usize],
 ) -> FramePatch {
-    let (full_redraw, damaged_rows) = if force_full_redraw {
-        (true, (0..rows).collect())
+    let (full_redraw_reason, mut damaged_rows) = if let Some(reason) = forced_full_redraw {
+        (Some(reason), (0..rows).collect())
     } else {
         match terminal.damage() {
-            TermDamage::Full => (true, (0..rows).collect()),
+            TermDamage::Full => (Some(FullRedrawReason::TerminalDamage), (0..rows).collect()),
             TermDamage::Partial(lines) => {
                 let mut rows = lines
                     .filter_map(|damage| (damage.line < rows).then_some(damage.line))
                     .collect::<Vec<_>>();
                 rows.sort_unstable();
                 rows.dedup();
-                (false, rows)
+                (None, rows)
             }
         }
     };
+    damaged_rows.extend(extra_dirty_rows.iter().copied().filter(|row| *row < rows));
+    damaged_rows.sort_unstable();
+    damaged_rows.dedup();
+    let full_redraw = full_redraw_reason.is_some();
 
     let cursor_blinking = terminal.cursor_style().blinking;
     let content = terminal.renderable_content();
@@ -157,6 +170,7 @@ pub(super) fn capture_frame<T: EventListener>(
         columns,
         rows,
         full_redraw,
+        full_redraw_reason,
         changed_rows,
         cursor,
         title: None,

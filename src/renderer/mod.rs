@@ -242,13 +242,14 @@ impl GpuTerminalRenderer {
             .map(|row| row.cells.len())
             .sum::<usize>();
         let mut uploaded_bytes = 0;
+        let mut text_spans = 0;
 
         for row in &frame.changed_rows {
             if row.row >= self.rows {
                 continue;
             }
             self.update_cell_row(row.row, &row.cells);
-            self.update_text_row(row.row, &row.cells);
+            text_spans += self.update_text_row(row.row, &row.cells);
             let start = row.row * self.columns;
             let end = start + self.columns;
             let bytes = bytemuck::cast_slice(&self.cell_instances[start..end]);
@@ -282,9 +283,10 @@ impl GpuTerminalRenderer {
         self.update_cursor_buffer();
         self.render_pending = true;
         self.stats.record_apply(
-            frame.full_redraw,
+            frame.full_redraw_reason,
             dirty_rows,
             changed_cells,
+            text_spans,
             uploaded_bytes,
             started.elapsed(),
         );
@@ -307,6 +309,7 @@ impl GpuTerminalRenderer {
             self.render_pending = false;
             return;
         }
+        let full_surface = dirty_rows.len() == self.rows;
         self.glyph_viewport.update(
             &self.queue,
             Resolution {
@@ -396,7 +399,8 @@ impl GpuTerminalRenderer {
         self.glyph_atlas.trim();
         self.clear_pending = false;
         self.render_pending = false;
-        self.stats.record_render(started.elapsed());
+        self.stats
+            .record_render(full_surface, dirty_rows.len(), started.elapsed());
     }
 
     pub(crate) fn tick_cursor(&mut self) -> bool {
@@ -510,9 +514,9 @@ impl GpuTerminalRenderer {
         }
     }
 
-    fn update_text_row(&mut self, row: usize, cells: &[TerminalCellPatch]) {
+    fn update_text_row(&mut self, row: usize, cells: &[TerminalCellPatch]) -> usize {
         let Some(buffer) = self.row_buffers.get_mut(row) else {
-            return;
+            return 0;
         };
         let mut spans = Vec::<OwnedSpan>::with_capacity(cells.len() + 2);
         let mut next_column = 0;
@@ -575,6 +579,7 @@ impl GpuTerminalRenderer {
             None,
         );
         buffer.shape_until_scroll(&mut self.font_system, false);
+        spans.len()
     }
 
     fn update_cursor_buffer(&self) {
@@ -760,6 +765,7 @@ mod tests {
             columns: 80,
             rows,
             full_redraw: true,
+            full_redraw_reason: Some(crate::terminal::FullRedrawReason::RendererRequest),
             changed_rows: (0..rows)
                 .map(|row| RowPatch {
                     row,

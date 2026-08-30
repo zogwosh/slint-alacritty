@@ -89,6 +89,10 @@ impl TerminalController {
         let _ = self.worker_sender.send(WorkerMessage::CopySelection);
     }
 
+    pub(crate) fn select_all(&self) {
+        let _ = self.worker_sender.send(WorkerMessage::SelectAll);
+    }
+
     pub(crate) fn request_full_redraw(&self) {
         let _ = self.worker_sender.send(WorkerMessage::ForceFullRedraw);
     }

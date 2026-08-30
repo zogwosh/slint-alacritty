@@ -9,9 +9,9 @@ use super::{
 use alacritty_terminal::{
     event::{Event, EventListener, WindowSize},
     event_loop::{EventLoop, EventLoopSender, Msg},
-    grid::Scroll,
-    index::Side,
-    selection::{Selection, SelectionType},
+    grid::{Dimensions, Scroll},
+    index::{Column, Point, Side},
+    selection::{Selection, SelectionRange, SelectionType},
     sync::FairMutex,
     term::{Config, Term},
     tty::{self, Options},
@@ -195,7 +195,14 @@ pub(super) struct TerminalBackend {
     cell_height: u16,
     selecting: bool,
     pressed_button: Option<MouseButton>,
-    force_full_redraw: bool,
+    forced_full_redraw: Option<super::frame::FullRedrawReason>,
+    rendered_selection: SelectionSnapshot,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SelectionSnapshot {
+    range: Option<SelectionRange>,
+    display_offset: usize,
 }
 
 impl TerminalBackend {
@@ -242,7 +249,8 @@ impl TerminalBackend {
             cell_height,
             selecting: false,
             pressed_button: None,
-            force_full_redraw: false,
+            forced_full_redraw: None,
+            rendered_selection: SelectionSnapshot::default(),
         })
     }
 
@@ -251,14 +259,26 @@ impl TerminalBackend {
             return None;
         }
 
-        let force_full_redraw = std::mem::take(&mut self.force_full_redraw);
+        let forced_full_redraw = self.forced_full_redraw.take();
         let mut terminal = self.terminal.lock();
+        let selection = selection_snapshot(&terminal);
+        let selection_dirty_rows = if selection == self.rendered_selection {
+            Vec::new()
+        } else {
+            let mut rows = visible_selection_rows(self.rendered_selection, self.size.rows);
+            rows.extend(visible_selection_rows(selection, self.size.rows));
+            rows.sort_unstable();
+            rows.dedup();
+            rows
+        };
+        self.rendered_selection = selection;
         let mut frame = capture_frame(
             &mut terminal,
             self.size.columns,
             self.size.rows,
             self.generation,
-            force_full_redraw,
+            forced_full_redraw,
+            &selection_dirty_rows,
         );
         drop(terminal);
         frame.title = self.notifier.take_title();
@@ -271,7 +291,7 @@ impl TerminalBackend {
     }
 
     pub(super) fn request_full_redraw(&mut self) {
-        self.force_full_redraw = true;
+        self.forced_full_redraw = Some(super::frame::FullRedrawReason::RendererRequest);
         self.notifier.mark_dirty();
     }
 
@@ -314,6 +334,7 @@ impl TerminalBackend {
         let _ = self.pty_sender.send(Msg::Resize(new_window_size));
         self.size = size;
         self.generation = self.generation.wrapping_add(1);
+        self.forced_full_redraw = Some(super::frame::FullRedrawReason::Resize);
         self.notifier.mark_dirty();
     }
 
@@ -396,7 +417,6 @@ impl TerminalBackend {
             (_, MouseAction::Cancel) => self.selecting = false,
             _ => return,
         }
-        self.force_full_redraw = true;
         drop(terminal);
         self.notifier.mark_dirty();
     }
@@ -449,6 +469,40 @@ impl TerminalBackend {
     pub(super) fn selected_text(&self) -> Option<String> {
         self.terminal.lock().selection_to_string()
     }
+
+    pub(super) fn select_all(&mut self) {
+        let mut terminal = self.terminal.lock();
+        let start = Point::new(terminal.topmost_line(), Column(0));
+        let end = Point::new(terminal.bottommost_line(), terminal.last_column());
+        let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
+        selection.update(end, Side::Right);
+        terminal.selection = Some(selection);
+        drop(terminal);
+        self.notifier.mark_dirty();
+    }
+}
+
+fn selection_snapshot<T: EventListener>(terminal: &Term<T>) -> SelectionSnapshot {
+    let content = terminal.renderable_content();
+    SelectionSnapshot {
+        range: content.selection,
+        display_offset: content.display_offset,
+    }
+}
+
+fn visible_selection_rows(snapshot: SelectionSnapshot, rows: usize) -> Vec<usize> {
+    let Some(range) = snapshot.range else {
+        return Vec::new();
+    };
+    let offset = snapshot.display_offset as i32;
+    let start = range.start.line.0 + offset;
+    let end = range.end.line.0 + offset;
+    if rows == 0 || end < 0 || start >= rows as i32 {
+        return Vec::new();
+    }
+    let start = start.max(0) as usize;
+    let end = end.min(rows as i32 - 1) as usize;
+    (start..=end).collect()
 }
 
 impl Drop for TerminalBackend {
@@ -481,7 +535,11 @@ fn window_size(size: TerminalSize, cell_width: u16, cell_height: u16) -> WindowS
 
 #[cfg(test)]
 mod tests {
-    use super::encode_paste;
+    use super::{SelectionSnapshot, encode_paste, visible_selection_rows};
+    use alacritty_terminal::{
+        index::{Column, Line, Point},
+        selection::SelectionRange,
+    };
 
     #[test]
     fn paste_normalizes_lines_and_protects_bracketed_terminator() {
@@ -490,5 +548,28 @@ mod tests {
             encode_paste("one\x1b[201~two", true),
             b"\x1b[200~one[201~two\x1b[201~"
         );
+    }
+
+    #[test]
+    fn selection_damage_is_clipped_to_visible_rows() {
+        let snapshot = SelectionSnapshot {
+            range: Some(SelectionRange::new(
+                Point::new(Line(-2), Column(0)),
+                Point::new(Line(2), Column(5)),
+                false,
+            )),
+            display_offset: 0,
+        };
+        assert_eq!(visible_selection_rows(snapshot, 3), vec![0, 1, 2]);
+
+        let hidden = SelectionSnapshot {
+            range: Some(SelectionRange::new(
+                Point::new(Line(-4), Column(0)),
+                Point::new(Line(-2), Column(5)),
+                false,
+            )),
+            display_offset: 0,
+        };
+        assert!(visible_selection_rows(hidden, 3).is_empty());
     }
 }
