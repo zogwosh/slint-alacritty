@@ -1,6 +1,52 @@
 use crate::terminal::KeyInput;
 use slint::{SharedString, platform::Key};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum KeyAction {
+    Forward,
+    Copy,
+    SelectAll,
+    Paste,
+    Interrupt,
+    NewTab,
+    CloseTab,
+    Ignore,
+}
+
+/// Resolves application shortcuts before terminal key encoding.
+pub(super) fn key_action(
+    text: &str,
+    control: bool,
+    alt: bool,
+    shift: bool,
+    altgr: bool,
+) -> KeyAction {
+    if altgr {
+        return KeyAction::Forward;
+    }
+
+    let exact_control = control && !alt && !shift;
+    let exact_control_shift = control && !alt && shift;
+    let exact_alt = alt && !control && !shift;
+    if exact_control_shift && text.eq_ignore_ascii_case("t") {
+        KeyAction::NewTab
+    } else if exact_control_shift && text.eq_ignore_ascii_case("w") {
+        KeyAction::CloseTab
+    } else if exact_control && text.eq_ignore_ascii_case("c") {
+        KeyAction::Copy
+    } else if exact_control && text.eq_ignore_ascii_case("a") {
+        KeyAction::SelectAll
+    } else if exact_control && text.eq_ignore_ascii_case("v") {
+        KeyAction::Paste
+    } else if exact_alt && text.eq_ignore_ascii_case("c") {
+        KeyAction::Interrupt
+    } else if control || alt {
+        KeyAction::Ignore
+    } else {
+        KeyAction::Forward
+    }
+}
+
 /// Converts Slint's key representation into the terminal-facing input model.
 pub(super) fn normalize_key(text: &str) -> Option<KeyInput> {
     let is = |key: Key| text == SharedString::from(key).as_str();
@@ -75,4 +121,55 @@ pub(super) fn normalize_key(text: &str) -> Option<KeyInput> {
         KeyInput::Text(text.into())
     };
     Some(input)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KeyAction, key_action};
+
+    #[test]
+    fn resolves_supported_shortcuts() {
+        assert_eq!(key_action("c", true, false, false, false), KeyAction::Copy);
+        assert_eq!(
+            key_action("A", true, false, false, false),
+            KeyAction::SelectAll
+        );
+        assert_eq!(key_action("v", true, false, false, false), KeyAction::Paste);
+        assert_eq!(key_action("t", true, false, true, false), KeyAction::NewTab);
+        assert_eq!(
+            key_action("W", true, false, true, false),
+            KeyAction::CloseTab
+        );
+        assert_eq!(
+            key_action("C", false, true, false, false),
+            KeyAction::Interrupt
+        );
+    }
+
+    #[test]
+    fn blocks_unsupported_shortcuts() {
+        assert_eq!(
+            key_action("x", true, false, false, false),
+            KeyAction::Ignore
+        );
+        assert_eq!(key_action("c", true, false, true, false), KeyAction::Ignore);
+        assert_eq!(key_action("v", true, true, false, false), KeyAction::Ignore);
+        assert_eq!(
+            key_action("x", false, true, false, false),
+            KeyAction::Ignore
+        );
+    }
+
+    #[test]
+    fn forwards_text_and_altgr_input() {
+        assert_eq!(
+            key_action("x", false, false, false, false),
+            KeyAction::Forward
+        );
+        assert_eq!(
+            key_action("X", false, false, true, false),
+            KeyAction::Forward
+        );
+        assert_eq!(key_action("@", true, true, false, true), KeyAction::Forward);
+    }
 }

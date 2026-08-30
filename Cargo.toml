@@ -16,6 +16,7 @@ slint = { version = "=1.17.1", default-features = false, features = [
     "accessibility",
     "backend-winit",
     "compat-1-2",
+    "raw-window-handle-06",
     "renderer-femtovg-wgpu",
     "std",
     "unstable-wgpu-29",
@@ -24,5 +25,6 @@ alacritty_terminal = "0.26.0"
 arboard = { version = "3.6.1", default-features = false }
 bytemuck = { version = "1.23", features = ["derive"] }
 glyphon = "0.11.0"
+raw-window-handle = "0.6"
 [build-dependencies]
 slint-build = "=1.17.1"

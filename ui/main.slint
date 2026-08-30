@@ -1,43 +1,272 @@
 import { TerminalView } from "terminal-view.slint";
 
+export struct TabData {
+    id: int,
+    title: string,
+    terminal-active: bool,
+}
+
+component TrafficLight inherits Rectangle {
+    in property <color> button-color;
+    in property <string> symbol;
+    callback activated;
+
+    width: 13px;
+    height: 13px;
+    border-radius: 7px;
+    background: touch.pressed ? button-color.darker(18%) : button-color;
+    border-width: 1px;
+    border-color: button-color.darker(14%);
+
+    Text {
+        width: 100%;
+        height: 100%;
+        y: -1px;
+        text: touch.has-hover ? root.symbol : "";
+        color: #2a2020a8;
+        font-size: 9px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.activated(); }
+    }
+}
+
+component TerminalTab inherits Rectangle {
+    in property <TabData> tab;
+    in property <bool> active;
+    callback selected;
+    callback closed;
+
+    height: 32px;
+    border-radius: 7px;
+    background: active ? #30363d : tab-touch.has-hover ? #252b32 : transparent;
+
+    Rectangle {
+        x: 10px;
+        y: (parent.height - self.height) / 2;
+        width: 7px;
+        height: 7px;
+        border-radius: 4px;
+        background: root.tab.terminal-active ? (root.active ? #4cc38a : #66717d) : #f0b84b;
+    }
+
+    Text {
+        x: 25px;
+        width: parent.width - 53px;
+        height: parent.height;
+        text: root.tab.title;
+        color: root.active ? #f0f3f6 : #9da7b3;
+        font-family: "Segoe UI";
+        font-size: 12px;
+        font-weight: root.active ? 600 : 400;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    tab-touch := TouchArea {
+        width: 100%;
+        mouse-cursor: pointer;
+        clicked => { root.selected(); }
+    }
+
+    close-button := Rectangle {
+        x: parent.width - 27px;
+        y: 6px;
+        width: 20px;
+        height: 20px;
+        border-radius: 5px;
+        background: close-touch.pressed ? #454d57 : close-touch.has-hover ? #3b424b : transparent;
+        visible: root.active || tab-touch.has-hover || close-touch.has-hover;
+
+        Text {
+            width: 100%;
+            height: 100%;
+            y: -1px;
+            text: "×";
+            color: #b8c0ca;
+            font-family: "Segoe UI";
+            font-size: 16px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        close-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.closed(); }
+        }
+    }
+}
+
 export component MainWindow inherits Window {
     title: root.terminal-title;
-    width: 800px;
-    height: 480px;
+    preferred-width: 900px;
+    preferred-height: 540px;
+    min-width: 560px;
+    min-height: 320px;
     background: #0d1117;
+    no-frame: true;
+    resize-border-width: 6px;
 
     in property <image> terminal-frame;
     in property <string> terminal-title: "Slint Terminal";
     in property <bool> terminal-active: true;
     in property <string> exit-message;
+    in property <[TabData]> tabs;
+    in property <int> active-tab-id: -1;
     callback key-input(string, bool, bool, bool, bool);
     callback viewport-resized(int, int);
     callback frame-ready;
     callback mouse-input(int, int, int, int, bool, bool, bool, bool);
     callback mouse-scroll(int, int, float, bool, bool, bool);
+    callback new-tab;
+    callback select-tab(int);
+    callback close-tab(int);
+    callback drag-window(float, float);
 
     out property <length> cell-width: terminal-view.cell-width;
     out property <length> cell-height: terminal-view.cell-height;
     out property <int> viewport-columns: terminal-view.column-count;
     out property <int> viewport-rows: terminal-view.row-count;
+    out property <length> terminal-width: terminal-view.width;
+    out property <length> terminal-height: terminal-view.height;
 
-    terminal-view := TerminalView {
+    window-content := Rectangle {
         width: 100%;
         height: 100%;
-        frame: root.terminal-frame;
-        terminal-active: root.terminal-active;
-        exit-message: root.exit-message;
-        key-input(text, control, alt, shift, altgr) => {
-            root.key-input(text, control, alt, shift, altgr);
+        background: #0d1117;
+
+        title-bar := Rectangle {
+            y: 0px;
+            width: 100%;
+            height: 44px;
+            background: #171c22;
+
+            drag-area := TouchArea {
+                width: 100%;
+                height: 100%;
+                mouse-cursor: grab;
+                moved => {
+                    root.drag-window(
+                        (self.mouse-x - self.pressed-x) / 1px,
+                        (self.mouse-y - self.pressed-y) / 1px,
+                    );
+                }
+                double-clicked => { root.maximized = !root.maximized; }
+            }
+
+            traffic-lights := HorizontalLayout {
+                x: 16px;
+                y: 15px;
+                width: 53px;
+                height: 14px;
+                spacing: 8px;
+
+                TrafficLight {
+                    button-color: #ff5f57;
+                    symbol: "×";
+                    activated => { root.close(); }
+                }
+                TrafficLight {
+                    button-color: #febc2e;
+                    symbol: "−";
+                    activated => { root.minimized = true; }
+                }
+                TrafficLight {
+                    button-color: #28c840;
+                    symbol: "+";
+                    activated => { root.maximized = !root.maximized; }
+                }
+            }
+
+            tab-strip := Rectangle {
+                x: 88px;
+                width: parent.width - 96px;
+                height: 100%;
+                clip: true;
+                background: transparent;
+
+                tabs-viewport := Rectangle {
+                    width: parent.width - 42px;
+                    height: 100%;
+                    clip: true;
+                    background: transparent;
+
+                    tabs-row := HorizontalLayout {
+                        y: 6px;
+                        width: 100%;
+                        height: 32px;
+                        spacing: 4px;
+
+                        for tab in root.tabs : TerminalTab {
+                            width: min(196px, max(84px, (tabs-viewport.width - 4px * max(0, root.tabs.length - 1)) / max(1, root.tabs.length)));
+                            tab: tab;
+                            active: tab.id == root.active-tab-id;
+                            selected => { root.select-tab(tab.id); }
+                            closed => { root.close-tab(tab.id); }
+                        }
+                    }
+                }
+
+                add-tab := Rectangle {
+                    x: parent.width - 36px;
+                    y: 6px;
+                    width: 34px;
+                    height: 32px;
+                    border-radius: 7px;
+                    background: add-touch.pressed ? #343b44 : add-touch.has-hover ? #293039 : transparent;
+
+                    Text {
+                        width: 100%;
+                        height: 100%;
+                        y: -1px;
+                        text: "+";
+                        color: #aab4bf;
+                        font-family: "Segoe UI";
+                        font-size: 20px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    add-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.new-tab(); }
+                    }
+                }
+            }
+
+            Rectangle {
+                y: parent.height - 1px;
+                width: 100%;
+                height: 1px;
+                background: #2a3038;
+            }
         }
-        viewport-resized(columns, rows) => {
-            root.viewport-resized(columns, rows);
-        }
-        mouse-input(column, row, button, action, shift, alt, control, right-half) => {
-            root.mouse-input(column, row, button, action, shift, alt, control, right-half);
-        }
-        mouse-scroll(column, row, lines, shift, alt, control) => {
-            root.mouse-scroll(column, row, lines, shift, alt, control);
+
+        terminal-view := TerminalView {
+            x: 10px;
+            y: title-bar.height + 8px;
+            width: parent.width - 20px;
+            height: parent.height - title-bar.height - 18px;
+            frame: root.terminal-frame;
+            terminal-active: root.terminal-active;
+            exit-message: root.exit-message;
+            key-input(text, control, alt, shift, altgr) => {
+                root.key-input(text, control, alt, shift, altgr);
+            }
+            viewport-resized(columns, rows) => {
+                root.viewport-resized(columns, rows);
+            }
+            mouse-input(column, row, button, action, shift, alt, control, right-half) => {
+                root.mouse-input(column, row, button, action, shift, alt, control, right-half);
+            }
+            mouse-scroll(column, row, lines, shift, alt, control) => {
+                root.mouse-scroll(column, row, lines, shift, alt, control);
+            }
         }
     }
 }
