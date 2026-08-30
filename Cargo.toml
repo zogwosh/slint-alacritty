@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2024"
 build = "build.rs"
 
+[lints.clippy]
+correctness = "deny"
+suspicious = "deny"
+complexity = "deny"
+perf = "deny"
+style = "deny"
+
 [dependencies]
 slint = { version = "=1.17.1", default-features = false, features = [
     "accessibility",
