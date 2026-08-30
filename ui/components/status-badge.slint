@@ -1,0 +1,23 @@
+import { DesignTokens } from "../design-tokens.slint";
+
+export component StatusBadge inherits Rectangle {
+    in property <string> text;
+
+    height: DesignTokens.status-height;
+    border-radius: DesignTokens.radius-sm;
+    background: DesignTokens.color-danger-surface;
+
+    label := Text {
+        x: DesignTokens.space-2;
+        width: parent.width - DesignTokens.space-4;
+        height: parent.height;
+        text: root.text;
+        color: DesignTokens.color-icon;
+        font-family: DesignTokens.font-mono;
+        font-size: DesignTokens.text-xs;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    preferred-width: label.preferred-width + DesignTokens.space-4;
+}

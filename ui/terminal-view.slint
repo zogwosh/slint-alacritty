@@ -1,11 +1,14 @@
+import { DesignTokens } from "design-tokens.slint";
+import { StatusBadge } from "components/status-badge.slint";
+
 export component TerminalView inherits Rectangle {
-    background: #0d1117;
+    background: DesignTokens.color-canvas;
 
     in property <image> frame;
     in property <bool> terminal-active: true;
     in property <string> exit-message;
     out property <length> cell-width: font-probe.preferred-width / 10;
-    out property <length> cell-height: 20px;
+    out property <length> cell-height: DesignTokens.terminal-cell-height;
     out property <int> column-count: max(2, floor(self.width / self.cell-width));
     out property <int> row-count: max(1, floor(self.height / self.cell-height));
 
@@ -64,29 +67,15 @@ export component TerminalView inherits Rectangle {
         font-probe := Text {
             visible: false;
             text: "0000000000";
-            font-family: "Cascadia Mono";
-            font-size: 15px;
+            font-family: DesignTokens.font-mono;
+            font-size: DesignTokens.text-sm;
         }
 
-        if !root.terminal-active : Rectangle {
-            x: 8px;
-            y: parent.height - 28px;
-            width: min(parent.width - 16px, exit-label.preferred-width + 16px);
-            height: 22px;
-            border-radius: 4px;
-            background: #d9303742;
-
-            exit-label := Text {
-                x: 8px;
-                width: parent.width - 16px;
-                height: parent.height;
-                text: root.exit-message;
-                color: #b1bac4;
-                font-family: "Cascadia Mono";
-                font-size: 12px;
-                vertical-alignment: center;
-                overflow: elide;
-            }
+        if !root.terminal-active : StatusBadge {
+            x: DesignTokens.space-2;
+            y: parent.height - self.height - DesignTokens.space-1-5;
+            width: min(parent.width - DesignTokens.space-4, self.preferred-width);
+            text: root.exit-message;
         }
 
 

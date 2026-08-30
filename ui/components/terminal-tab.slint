@@ -1,0 +1,60 @@
+import { DesignTokens } from "../design-tokens.slint";
+import { TabData } from "../models.slint";
+import { IconButton } from "icon-button.slint";
+
+export component TerminalTab inherits Rectangle {
+    in property <TabData> tab;
+    in property <bool> active;
+    private property <length> indicator-size: 7px;
+    private property <length> label-left: DesignTokens.space-2-5 + root.indicator-size + DesignTokens.space-2;
+    private property <length> label-right: DesignTokens.icon-button-size + 2 * DesignTokens.space-2;
+    callback selected;
+    callback closed;
+
+    height: DesignTokens.tab-height;
+    border-radius: DesignTokens.radius-lg;
+    background: root.active
+        ? DesignTokens.color-surface-active
+        : tab-touch.has-hover ? DesignTokens.color-surface-hover : transparent;
+
+    Rectangle {
+        x: DesignTokens.space-2-5;
+        y: (parent.height - self.height) / 2;
+        width: root.indicator-size;
+        height: root.indicator-size;
+        border-radius: DesignTokens.radius-full;
+        background: root.tab.terminal-active
+            ? (root.active ? DesignTokens.color-success : DesignTokens.color-idle)
+            : DesignTokens.color-warning;
+    }
+
+    Text {
+        x: root.label-left;
+        width: parent.width - root.label-left - root.label-right;
+        height: parent.height;
+        text: root.tab.title;
+        color: root.active ? DesignTokens.color-text : DesignTokens.color-text-muted;
+        font-family: DesignTokens.font-ui;
+        font-size: DesignTokens.text-xs;
+        font-weight: root.active ? 600 : 400;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    tab-touch := TouchArea {
+        width: 100%;
+        mouse-cursor: pointer;
+        clicked => { root.selected(); }
+    }
+
+    close-button := IconButton {
+        x: parent.width - DesignTokens.icon-button-size - DesignTokens.space-2;
+        y: (parent.height - self.height) / 2;
+        width: DesignTokens.icon-button-size;
+        height: DesignTokens.icon-button-size;
+        icon: "×";
+        icon-size: DesignTokens.text-base;
+        visible: root.active || tab-touch.has-hover || self.hovered;
+        activated => { root.closed(); }
+    }
+}

@@ -1,0 +1,113 @@
+import { DesignTokens } from "../design-tokens.slint";
+import { TabData } from "../models.slint";
+import { IconButton } from "icon-button.slint";
+import { TerminalTab } from "terminal-tab.slint";
+import { TrafficLight } from "traffic-light.slint";
+
+export component TitleBar inherits Rectangle {
+    in property <[TabData]> tabs;
+    in property <int> active-tab-id: -1;
+    callback close-window;
+    callback minimize-window;
+    callback toggle-maximize;
+    callback drag-window(float, float);
+    callback new-tab;
+    callback select-tab(int);
+    callback close-tab(int);
+
+    height: DesignTokens.titlebar-height;
+    background: DesignTokens.color-surface;
+
+    drag-area := TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: grab;
+        moved => {
+            root.drag-window(
+                (self.mouse-x - self.pressed-x) / 1px,
+                (self.mouse-y - self.pressed-y) / 1px,
+            );
+        }
+        double-clicked => { root.toggle-maximize(); }
+    }
+
+    HorizontalLayout {
+        x: DesignTokens.space-4;
+        y: (parent.height - self.height) / 2;
+        width: 3 * DesignTokens.traffic-light-size + 2 * DesignTokens.space-2;
+        height: DesignTokens.traffic-light-size;
+        spacing: DesignTokens.space-2;
+
+        TrafficLight {
+            button-color: DesignTokens.color-window-close;
+            symbol: "×";
+            activated => { root.close-window(); }
+        }
+        TrafficLight {
+            button-color: DesignTokens.color-window-minimize;
+            symbol: "−";
+            activated => { root.minimize-window(); }
+        }
+        TrafficLight {
+            button-color: DesignTokens.color-window-maximize;
+            symbol: "+";
+            activated => { root.toggle-maximize(); }
+        }
+    }
+
+    tab-strip := Rectangle {
+        x: DesignTokens.titlebar-tabs-left;
+        width: parent.width - DesignTokens.titlebar-tabs-left - DesignTokens.titlebar-tabs-right;
+        height: 100%;
+        clip: true;
+        background: transparent;
+
+        tabs-viewport := Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width - DesignTokens.tab-add-slot-width;
+            height: 100%;
+            clip: true;
+            background: transparent;
+
+            HorizontalLayout {
+                y: DesignTokens.space-1-5;
+                width: 100%;
+                height: DesignTokens.tab-height;
+                spacing: DesignTokens.space-1;
+
+                for tab in root.tabs : TerminalTab {
+                    width: min(
+                        DesignTokens.tab-max-width,
+                        max(
+                            DesignTokens.tab-min-width,
+                            (tabs-viewport.width - DesignTokens.space-1 * max(0, root.tabs.length - 1))
+                                / max(1, root.tabs.length),
+                        ),
+                    );
+                    tab: tab;
+                    active: tab.id == root.active-tab-id;
+                    selected => { root.select-tab(tab.id); }
+                    closed => { root.close-tab(tab.id); }
+                }
+            }
+        }
+
+        IconButton {
+            x: parent.width - DesignTokens.add-button-width - DesignTokens.space-0-5;
+            y: DesignTokens.space-1-5;
+            width: DesignTokens.add-button-width;
+            height: DesignTokens.tab-height;
+            icon: "+";
+            icon-color: DesignTokens.color-text-subtle;
+            activated => { root.new-tab(); }
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        width: 100%;
+        height: 1px;
+        background: DesignTokens.color-border;
+    }
+}

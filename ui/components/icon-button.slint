@@ -1,0 +1,31 @@
+import { DesignTokens } from "../design-tokens.slint";
+
+export component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <length> icon-size: DesignTokens.text-lg;
+    in property <color> icon-color: DesignTokens.color-icon;
+    out property <bool> hovered: touch.has-hover;
+    callback activated;
+
+    border-radius: DesignTokens.radius-md;
+    background: touch.pressed
+        ? DesignTokens.color-control-pressed
+        : touch.has-hover ? DesignTokens.color-control-hover : transparent;
+
+    Text {
+        width: 100%;
+        height: 100%;
+        y: -1px;
+        text: root.icon;
+        color: root.icon-color;
+        font-family: DesignTokens.font-ui;
+        font-size: root.icon-size;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.activated(); }
+    }
+}

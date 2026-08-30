@@ -310,9 +310,35 @@ fn connect_mouse(ui: &MainWindow, tabs: Rc<RefCell<TabManager>>) {
 }
 
 fn connect_resize(ui: &MainWindow, tabs: Rc<RefCell<TabManager>>) {
+    let weak_ui = ui.as_weak();
+    let resize_suspended = Rc::new(Cell::new(false));
     ui.on_viewport_resized(move |columns, rows| {
+        let Some(ui) = weak_ui.upgrade() else {
+            return;
+        };
+
+        let terminal_width = ui.get_terminal_width();
+        let terminal_height = ui.get_terminal_height();
+        let cell_width = ui.get_cell_width();
+        let cell_height = ui.get_cell_height();
+        let invalid_viewport = ui.window().is_minimized()
+            || !terminal_width.is_finite()
+            || !terminal_height.is_finite()
+            || terminal_width <= cell_width
+            || terminal_height <= cell_height
+            || columns <= 2
+            || rows <= 1;
+
+        if invalid_viewport {
+            resize_suspended.set(true);
+            return;
+        }
+
         if let Some(controller) = tabs.borrow().active_controller() {
-            controller.resize(columns.max(2) as usize, rows.max(1) as usize);
+            controller.resize(columns as usize, rows as usize);
+            if resize_suspended.replace(false) {
+                controller.request_full_redraw();
+            }
         }
     });
 }

@@ -1,0 +1,31 @@
+import { DesignTokens } from "../design-tokens.slint";
+
+export component TrafficLight inherits Rectangle {
+    in property <color> button-color;
+    in property <string> symbol;
+    callback activated;
+
+    width: DesignTokens.traffic-light-size;
+    height: DesignTokens.traffic-light-size;
+    border-radius: DesignTokens.radius-full;
+    background: touch.pressed ? root.button-color.darker(18%) : root.button-color;
+    border-width: 1px;
+    border-color: root.button-color.darker(14%);
+
+    Text {
+        width: 100%;
+        height: 100%;
+        y: -1px;
+        text: touch.has-hover ? root.symbol : "";
+        color: DesignTokens.color-traffic-symbol;
+        font-size: DesignTokens.text-2xs;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.activated(); }
+    }
+}

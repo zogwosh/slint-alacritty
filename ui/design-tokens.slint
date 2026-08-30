@@ -1,0 +1,63 @@
+// Tailwind-style design tokens: a small primitive scale plus semantic aliases.
+// Components consume these names instead of embedding visual values.
+export global DesignTokens {
+    // Primitive spacing scale (4 px base unit).
+    out property <length> space-0-5: 2px;
+    out property <length> space-1: 4px;
+    out property <length> space-1-5: 6px;
+    out property <length> space-2: 8px;
+    out property <length> space-2-5: 10px;
+    out property <length> space-3: 12px;
+    out property <length> space-4: 16px;
+    out property <length> space-5: 20px;
+
+    // Radius scale.
+    out property <length> radius-sm: 4px;
+    out property <length> radius-md: 5px;
+    out property <length> radius-lg: 7px;
+    out property <length> radius-full: 999px;
+
+    // Typography scale.
+    out property <string> font-ui: "Segoe UI";
+    out property <string> font-mono: "Cascadia Mono";
+    out property <length> text-2xs: 9px;
+    out property <length> text-xs: 12px;
+    out property <length> text-sm: 15px;
+    out property <length> text-base: 16px;
+    out property <length> text-lg: 20px;
+
+    // Semantic colors.
+    out property <color> color-canvas: #0d1117;
+    out property <color> color-surface: #171c22;
+    out property <color> color-surface-hover: #293039;
+    out property <color> color-surface-active: #30363d;
+    out property <color> color-control-hover: #3b424b;
+    out property <color> color-control-pressed: #454d57;
+    out property <color> color-border: #2a3038;
+    out property <color> color-text: #f0f3f6;
+    out property <color> color-text-muted: #9da7b3;
+    out property <color> color-text-subtle: #aab4bf;
+    out property <color> color-icon: #b8c0ca;
+    out property <color> color-success: #4cc38a;
+    out property <color> color-idle: #66717d;
+    out property <color> color-warning: #f0b84b;
+    out property <color> color-danger-surface: #d9303742;
+    out property <color> color-traffic-symbol: #2a2020a8;
+    out property <color> color-window-close: #ff5f57;
+    out property <color> color-window-minimize: #febc2e;
+    out property <color> color-window-maximize: #28c840;
+
+    // Component sizing tokens.
+    out property <length> titlebar-height: 44px;
+    out property <length> titlebar-tabs-left: 88px;
+    out property <length> titlebar-tabs-right: 8px;
+    out property <length> traffic-light-size: 13px;
+    out property <length> tab-height: 32px;
+    out property <length> tab-min-width: 84px;
+    out property <length> tab-max-width: 196px;
+    out property <length> tab-add-slot-width: 42px;
+    out property <length> icon-button-size: 20px;
+    out property <length> add-button-width: 34px;
+    out property <length> status-height: 22px;
+    out property <length> terminal-cell-height: 20px;
+}
