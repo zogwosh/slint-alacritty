@@ -1,9 +1,12 @@
 import { DesignTokens } from "../design-tokens.slint";
+import { Icon, IconName } from "../icons/icon.slint";
 
 // 无边框窗口使用的圆形窗口控制按钮。
 export component TrafficLight inherits Rectangle {
     in property <color> button-color;
-    in property <string> symbol;
+    in property <IconName> symbol;
+    in property <bool> show-symbol;
+    out property <bool> hovered: touch.has-hover;
     callback activated;
 
     width: DesignTokens.traffic-light-size;
@@ -13,16 +16,13 @@ export component TrafficLight inherits Rectangle {
     border-width: 1px;
     border-color: root.button-color.darker(14%);
 
-    Text {
-        width: 100%;
-        height: 100%;
-        y: -1px;
-        text: touch.has-hover ? root.symbol : "";
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        name: root.symbol;
+        size: DesignTokens.traffic-symbol-size;
         color: DesignTokens.color-traffic-symbol;
-        font-size: DesignTokens.text-2xs;
-        font-weight: 700;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+        visible: root.show-symbol;
     }
 
     touch := TouchArea {

@@ -5,9 +5,11 @@ mod input;
 mod platform;
 mod rendering;
 mod sessions;
+pub(crate) mod settings;
 
 use crate::{MainWindow, renderer::GpuTerminalRenderer};
 use sessions::{TabManager, create_session, sync_tab_ui};
+use settings::{AppSettings, mono_font_families, sync_profile_draft, sync_settings_ui};
 use slint::{ComponentHandle, Timer, TimerMode};
 use std::{
     cell::{Cell, RefCell},
@@ -19,13 +21,25 @@ use std::{
 /// 创建窗口和初始会话，连接各职责模块后进入 Slint 事件循环。
 pub(crate) fn run() -> Result<(), Box<dyn Error>> {
     let ui = MainWindow::new()?;
+    let settings = Rc::new(RefCell::new(AppSettings::load()));
+    let mono_fonts = Rc::new(mono_font_families());
+    sync_settings_ui(&ui, &settings.borrow(), &mono_fonts);
+    sync_profile_draft(&ui, settings.borrow().default_profile());
     let initial_columns = ui.get_viewport_columns().max(2) as usize;
     let initial_rows = ui.get_viewport_rows().max(1) as usize;
-    let first_session = create_session(&ui, 1, initial_columns, initial_rows)?;
+    let first_session = create_session(
+        &ui,
+        1,
+        initial_columns,
+        initial_rows,
+        settings.borrow().default_profile(),
+    )?;
     let tabs = Rc::new(RefCell::new(TabManager {
         sessions: vec![first_session],
         active: 0,
         next_id: 2,
+        settings_open: false,
+        settings_active: false,
     }));
     sync_tab_ui(&ui, &tabs.borrow());
 
@@ -40,10 +54,21 @@ pub(crate) fn run() -> Result<(), Box<dyn Error>> {
         tabs.clone(),
         awaiting_full_frame.clone(),
     )?;
-    bindings::connect_input(&ui, tabs.clone(), awaiting_full_frame.clone());
+    bindings::connect_input(
+        &ui,
+        tabs.clone(),
+        settings.clone(),
+        awaiting_full_frame.clone(),
+    );
     bindings::connect_resize(&ui, tabs.clone());
     bindings::connect_mouse(&ui, tabs.clone());
-    bindings::connect_tabs(&ui, tabs.clone(), awaiting_full_frame.clone());
+    bindings::connect_tabs(
+        &ui,
+        tabs.clone(),
+        settings.clone(),
+        mono_fonts,
+        awaiting_full_frame.clone(),
+    );
     bindings::connect_window_controls(&ui);
     rendering::connect_frame_updates(&ui, tabs, renderer.clone(), awaiting_full_frame);
 

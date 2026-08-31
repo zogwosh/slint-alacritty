@@ -3,54 +3,116 @@
 use crate::terminal::KeyInput;
 use slint::{SharedString, platform::Key};
 
+use super::settings::{AppSettings, ShortcutChord, parse_shortcut};
+
 /// 应用层对一次按键的处理决定。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum KeyAction {
-    /// 继续交给终端协议编码器。
-    Forward,
     Copy,
     SelectAll,
     Paste,
     Interrupt,
     NewTab,
     CloseTab,
-    Ignore,
+    Quit,
 }
 
-/// 在终端编码之前解析应用快捷键。
-///
-/// Ctrl+C/A/V 与 Alt+C 是明确的产品策略；其他 Ctrl/Alt 组合也会被应用拦截。
-pub(super) fn key_action(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct KeyDecision {
+    pub(super) action: Option<KeyAction>,
+    pub(super) forward: bool,
+}
+
+/// 命中的应用快捷键按配置决定是否继续透传；未命中的按键始终交给终端。
+pub(super) fn configured_key_action(
+    settings: &AppSettings,
     text: &str,
     control: bool,
     alt: bool,
     shift: bool,
     altgr: bool,
-) -> KeyAction {
+) -> KeyDecision {
+    let default = KeyDecision {
+        action: None,
+        forward: true,
+    };
     if altgr {
-        return KeyAction::Forward;
+        return default;
     }
+    let Some(key) = event_key(text) else {
+        return default;
+    };
+    let pressed = ShortcutChord {
+        control,
+        alt,
+        shift,
+        key,
+    };
+    let Some(setting) = settings.shortcuts.iter().find(|setting| {
+        parse_shortcut(&setting.shortcut).is_ok_and(|shortcut| shortcut == pressed)
+    }) else {
+        return default;
+    };
+    KeyDecision {
+        action: shortcut_action(&setting.action),
+        forward: setting.pass_through,
+    }
+}
 
-    let exact_control = control && !alt && !shift;
-    let exact_control_shift = control && !alt && shift;
-    let exact_alt = alt && !control && !shift;
-    if exact_control_shift && text.eq_ignore_ascii_case("t") {
-        KeyAction::NewTab
-    } else if exact_control_shift && text.eq_ignore_ascii_case("w") {
-        KeyAction::CloseTab
-    } else if exact_control && text.eq_ignore_ascii_case("c") {
-        KeyAction::Copy
-    } else if exact_control && text.eq_ignore_ascii_case("a") {
-        KeyAction::SelectAll
-    } else if exact_control && text.eq_ignore_ascii_case("v") {
-        KeyAction::Paste
-    } else if exact_alt && text.eq_ignore_ascii_case("c") {
-        KeyAction::Interrupt
-    } else if control || alt {
-        KeyAction::Ignore
-    } else {
-        KeyAction::Forward
+fn shortcut_action(action: &str) -> Option<KeyAction> {
+    match action {
+        "copy" => Some(KeyAction::Copy),
+        "select-all" => Some(KeyAction::SelectAll),
+        "paste" => Some(KeyAction::Paste),
+        "interrupt" => Some(KeyAction::Interrupt),
+        "new-tab" => Some(KeyAction::NewTab),
+        "close-tab" => Some(KeyAction::CloseTab),
+        "quit" => Some(KeyAction::Quit),
+        _ => None,
     }
+}
+
+fn event_key(text: &str) -> Option<String> {
+    let named = [
+        (Key::Return, "Enter"),
+        (Key::Tab, "Tab"),
+        (Key::Escape, "Escape"),
+        (Key::Backspace, "Backspace"),
+        (Key::Delete, "Delete"),
+        (Key::Insert, "Insert"),
+        (Key::Home, "Home"),
+        (Key::End, "End"),
+        (Key::PageUp, "PageUp"),
+        (Key::PageDown, "PageDown"),
+        (Key::UpArrow, "Up"),
+        (Key::DownArrow, "Down"),
+        (Key::LeftArrow, "Left"),
+        (Key::RightArrow, "Right"),
+        (Key::F1, "F1"),
+        (Key::F2, "F2"),
+        (Key::F3, "F3"),
+        (Key::F4, "F4"),
+        (Key::F5, "F5"),
+        (Key::F6, "F6"),
+        (Key::F7, "F7"),
+        (Key::F8, "F8"),
+        (Key::F9, "F9"),
+        (Key::F10, "F10"),
+        (Key::F11, "F11"),
+        (Key::F12, "F12"),
+    ];
+    if let Some((_, name)) = named
+        .iter()
+        .find(|(key, _)| text == SharedString::from(*key).as_str())
+    {
+        return Some((*name).to_owned());
+    }
+    let mut characters = text.chars();
+    let character = characters.next()?;
+    if characters.next().is_some() || character.is_control() {
+        return None;
+    }
+    Some(character.to_uppercase().collect())
 }
 
 /// 将 Slint 的按键表示转换成与 UI 框架无关的终端输入模型。
@@ -131,51 +193,81 @@ pub(super) fn normalize_key(text: &str) -> Option<KeyInput> {
 
 #[cfg(test)]
 mod tests {
-    use super::{KeyAction, key_action};
+    use super::{KeyAction, configured_key_action};
+    use crate::app::settings::AppSettings;
 
     #[test]
     fn resolves_supported_shortcuts() {
-        assert_eq!(key_action("c", true, false, false, false), KeyAction::Copy);
+        let settings = AppSettings::default();
         assert_eq!(
-            key_action("A", true, false, false, false),
-            KeyAction::SelectAll
-        );
-        assert_eq!(key_action("v", true, false, false, false), KeyAction::Paste);
-        assert_eq!(key_action("t", true, false, true, false), KeyAction::NewTab);
-        assert_eq!(
-            key_action("W", true, false, true, false),
-            KeyAction::CloseTab
+            configured_key_action(&settings, "c", true, false, false, false).action,
+            Some(KeyAction::Copy)
         );
         assert_eq!(
-            key_action("C", false, true, false, false),
-            KeyAction::Interrupt
+            configured_key_action(&settings, "A", true, false, false, false).action,
+            Some(KeyAction::SelectAll)
+        );
+        assert_eq!(
+            configured_key_action(&settings, "v", true, false, false, false).action,
+            Some(KeyAction::Paste)
+        );
+        assert_eq!(
+            configured_key_action(&settings, "t", true, false, false, false).action,
+            Some(KeyAction::NewTab)
+        );
+        assert_eq!(
+            configured_key_action(&settings, "W", true, false, false, false).action,
+            Some(KeyAction::CloseTab)
+        );
+        assert_eq!(
+            configured_key_action(&settings, "C", false, true, false, false).action,
+            Some(KeyAction::Interrupt)
+        );
+        assert_eq!(
+            configured_key_action(&settings, "q", false, true, false, false).action,
+            Some(KeyAction::Quit)
         );
     }
 
     #[test]
-    fn blocks_unsupported_shortcuts() {
-        assert_eq!(
-            key_action("x", true, false, false, false),
-            KeyAction::Ignore
-        );
-        assert_eq!(key_action("c", true, false, true, false), KeyAction::Ignore);
-        assert_eq!(key_action("v", true, true, false, false), KeyAction::Ignore);
-        assert_eq!(
-            key_action("x", false, true, false, false),
-            KeyAction::Ignore
-        );
+    fn forwards_unsupported_shortcuts() {
+        let settings = AppSettings::default();
+        for decision in [
+            configured_key_action(&settings, "x", true, false, false, false),
+            configured_key_action(&settings, "c", true, false, true, false),
+            configured_key_action(&settings, "t", true, false, true, false),
+            configured_key_action(&settings, "w", true, false, true, false),
+            configured_key_action(&settings, "v", true, true, false, false),
+            configured_key_action(&settings, "x", false, true, false, false),
+        ] {
+            assert_eq!(decision.action, None);
+            assert!(decision.forward);
+        }
     }
 
     #[test]
     fn forwards_text_and_altgr_input() {
+        let settings = AppSettings::default();
         assert_eq!(
-            key_action("x", false, false, false, false),
-            KeyAction::Forward
+            configured_key_action(&settings, "x", false, false, false, false).action,
+            None
         );
-        assert_eq!(
-            key_action("X", false, false, true, false),
-            KeyAction::Forward
-        );
-        assert_eq!(key_action("@", true, true, false, true), KeyAction::Forward);
+        assert!(configured_key_action(&settings, "X", false, false, true, false).forward);
+        assert!(configured_key_action(&settings, "@", true, true, false, true).forward);
+    }
+
+    #[test]
+    fn configured_shortcuts_are_not_forwarded_by_default() {
+        let settings = AppSettings::default();
+        assert!(!configured_key_action(&settings, "c", true, false, false, false).forward);
+    }
+
+    #[test]
+    fn configured_shortcuts_can_execute_and_forward() {
+        let mut settings = AppSettings::default();
+        settings.shortcuts[0].pass_through = true;
+        let decision = configured_key_action(&settings, "c", true, false, false, false);
+        assert_eq!(decision.action, Some(KeyAction::Copy));
+        assert!(decision.forward);
     }
 }

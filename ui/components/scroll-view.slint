@@ -1,0 +1,132 @@
+import { DesignTokens } from "../design-tokens.slint";
+
+// 项目统一的纵向滚动条。value 与 Flickable 一致：0px 为顶部，-maximum 为底部。
+export component AppScrollBar inherits Rectangle {
+    in property <length> maximum: 0px;
+    in property <length> page-size: 0px;
+    in property <bool> wheel-changes-value: true;
+    in-out property <length> value: 0px;
+    callback scrolled;
+    callback wheel(length, length, bool, bool, bool);
+
+    private property <length> drag-offset;
+
+    width: DesignTokens.space-2;
+    visible: root.maximum > 0px;
+    border-radius: DesignTokens.radius-full;
+    background: scroll-touch.has-hover || scroll-touch.pressed
+        ? DesignTokens.color-scrollbar-track : transparent;
+
+    thumb := Rectangle {
+        x: DesignTokens.space-0-5;
+        width: parent.width - 2 * DesignTokens.space-0-5;
+        height: max(
+            DesignTokens.space-5,
+            parent.height * root.page-size / max(1px, root.maximum + root.page-size),
+        );
+        y: root.maximum <= 0px ? 0px
+            : (parent.height - self.height) * (-root.value / root.maximum);
+        border-radius: DesignTokens.radius-full;
+        background: scroll-touch.pressed
+            ? DesignTokens.color-text-subtle
+            : scroll-touch.has-hover ? DesignTokens.color-text-muted
+            : DesignTokens.color-idle;
+        opacity: scroll-touch.has-hover || scroll-touch.pressed ? 0.9 : 0.62;
+
+        animate background { duration: 150ms; }
+        animate opacity { duration: 150ms; }
+    }
+
+    scroll-touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: pointer;
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.drag-offset = self.mouse-y >= thumb.y
+                    && self.mouse-y <= thumb.y + thumb.height
+                        ? self.mouse-y - thumb.y : thumb.height / 2;
+            }
+            if (event.kind == PointerEventKind.down
+                || (event.kind == PointerEventKind.move && self.pressed)) {
+                root.value = -root.maximum
+                    * max(
+                        0px,
+                        min(
+                            parent.height - thumb.height,
+                            self.mouse-y - root.drag-offset,
+                        ),
+                    ) / max(1px, parent.height - thumb.height);
+                root.scrolled();
+            }
+        }
+
+        scroll-event(event) => {
+            if (root.wheel-changes-value) {
+                root.value = max(-root.maximum, min(0px, root.value + event.delta-y));
+                root.scrolled();
+            }
+            root.wheel(
+                event.delta-y,
+                self.mouse-y,
+                event.modifiers.shift,
+                event.modifiers.alt,
+                event.modifiers.control,
+            );
+            accept
+        }
+    }
+}
+
+// 设置页等常规内容区域使用的统一纵向滚动容器。
+export component AppScrollView inherits Rectangle {
+    out property <length> visible-width <=> viewport.width;
+    out property <length> visible-height <=> viewport.height;
+    in-out property <length> viewport-width <=> viewport.viewport-width;
+    in-out property <length> viewport-height <=> viewport.viewport-height;
+    in-out property <length> viewport-x <=> viewport.viewport-x;
+    in-out property <length> viewport-y <=> viewport.viewport-y;
+
+    min-width: 50px;
+    min-height: 50px;
+    preferred-width: 100%;
+    preferred-height: 100%;
+    horizontal-stretch: 1;
+    vertical-stretch: 1;
+    clip: true;
+    background: transparent;
+
+    wheel-area := TouchArea {
+        width: 100%;
+        height: 100%;
+
+        scroll-event(event) => {
+            if (root.viewport-height <= root.visible-height || event.delta-y == 0px) {
+                return reject;
+            }
+            root.viewport-y = max(
+                -(root.viewport-height - root.visible-height),
+                min(0px, root.viewport-y + event.delta-y),
+            );
+            accept
+        }
+
+        viewport := Flickable {
+            width: 100%;
+            height: 100%;
+            interactive: true;
+
+            @children
+        }
+    }
+
+    scroll-bar := AppScrollBar {
+        x: parent.width - self.width;
+        y: DesignTokens.space-1;
+        height: parent.height - 2 * DesignTokens.space-1;
+        maximum: max(0px, root.viewport-height - root.visible-height);
+        page-size: root.visible-height;
+        value <=> root.viewport-y;
+    }
+}

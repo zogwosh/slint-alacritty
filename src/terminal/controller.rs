@@ -7,6 +7,7 @@ use super::{
     input::KeyInput,
     worker::run_worker,
 };
+use crate::app::settings::ShellProfile;
 use std::{
     io,
     sync::{
@@ -35,6 +36,7 @@ impl TerminalController {
         rows: usize,
         cell_width: f32,
         cell_height: f32,
+        profile: Option<&ShellProfile>,
         frame_notifier: impl Fn() + Send + Sync + 'static,
     ) -> io::Result<Self> {
         let (worker_sender, worker_receiver) = mpsc::channel();
@@ -44,6 +46,7 @@ impl TerminalController {
             cell_width,
             cell_height,
             worker_sender.clone(),
+            profile,
         )?;
         let latest_frame = Arc::new(Mutex::new(None));
         let worker_frame = latest_frame.clone();

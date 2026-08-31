@@ -49,7 +49,8 @@ pub(super) fn install_renderer(
                     ui.get_viewport_rows().max(1) as usize,
                     ui.get_cell_width() * scale,
                     ui.get_cell_height() * scale,
-                    15.0 * scale,
+                    ui.get_terminal_font_size() as f32 * scale,
+                    ui.get_terminal_font_family().as_str(),
                 );
                 match gpu.image() {
                     Ok(image) => ui.set_terminal_frame(image),
@@ -73,7 +74,8 @@ pub(super) fn install_renderer(
                         height,
                         ui.get_cell_width() * scale,
                         ui.get_cell_height() * scale,
-                        15.0 * scale,
+                        ui.get_terminal_font_size() as f32 * scale,
+                        ui.get_terminal_font_family().as_str(),
                     );
                     if texture_changed {
                         match gpu.image() {
@@ -138,7 +140,8 @@ pub(super) fn connect_frame_updates(
             height,
             ui.get_cell_width() * scale,
             ui.get_cell_height() * scale,
-            15.0 * scale,
+            ui.get_terminal_font_size() as f32 * scale,
+            ui.get_terminal_font_family().as_str(),
         );
         if !gpu.apply_frame(&frame) {
             awaiting_full_frame.set(true);

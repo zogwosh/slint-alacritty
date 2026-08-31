@@ -1,17 +1,20 @@
 import { DesignTokens } from "design-tokens.slint";
 import { StatusBadge } from "components/status-badge.slint";
+import { AppScrollBar } from "components/scroll-view.slint";
 
 export component TerminalView inherits Rectangle {
     background: DesignTokens.color-canvas;
 
     in property <image> frame;
+    in property <string> font-family: DesignTokens.font-mono;
+    in property <length> font-size: DesignTokens.text-sm;
     in property <bool> terminal-active: true;
     in property <string> exit-message;
     in property <int> scroll-offset;
     in property <int> scroll-history-lines;
     // 用十个等宽字符实测单元宽度，比复制一个固定像素值更能适应字体度量。
     out property <length> cell-width: font-probe.preferred-width / 10;
-    out property <length> cell-height: DesignTokens.terminal-cell-height;
+    out property <length> cell-height: root.font-size + 5px;
     out property <int> column-count: max(2, floor(self.width / self.cell-width));
     out property <int> row-count: max(1, floor(self.height / self.cell-height));
 
@@ -26,7 +29,6 @@ export component TerminalView inherits Rectangle {
     private property <bool> mouse-shift;
     private property <bool> mouse-alt;
     private property <bool> mouse-control;
-    private property <length> scroll-drag-offset;
 
     // Slint 的响应式属性变化会主动通知 Rust 调整 PTY 字符网格。
     changed column-count => {
@@ -77,8 +79,8 @@ export component TerminalView inherits Rectangle {
         font-probe := Text {
             visible: false;
             text: "0000000000";
-            font-family: DesignTokens.font-mono;
-            font-size: DesignTokens.text-sm;
+            font-family: root.font-family;
+            font-size: root.font-size;
         }
 
         if !root.terminal-active : StatusBadge {
@@ -142,76 +144,27 @@ export component TerminalView inherits Rectangle {
             }
         }
 
-        // 终端历史滚动条覆盖在视图右缘，不占用字符网格宽度。
-        if root.scroll-history-lines > 0 : scroll-track := Rectangle {
+        // 终端历史与其他页面复用同一个滚动条，不占用字符网格宽度。
+        if root.scroll-history-lines > 0 : AppScrollBar {
             x: parent.width - self.width;
             y: DesignTokens.space-1;
-            width: DesignTokens.space-2;
             height: parent.height - 2 * DesignTokens.space-1;
-            border-radius: DesignTokens.radius-full;
-            background: scroll-touch.has-hover ? DesignTokens.color-scrollbar-track : transparent;
-
-            scroll-thumb := Rectangle {
-                x: DesignTokens.space-0-5;
-                width: parent.width - 2 * DesignTokens.space-0-5;
-                height: max(
-                    DesignTokens.space-5,
-                    parent.height * root.row-count
-                        / (root.row-count + root.scroll-history-lines),
-                );
-                y: (parent.height - self.height)
-                    * (root.scroll-history-lines - root.scroll-offset)
-                    / root.scroll-history-lines;
-                border-radius: DesignTokens.radius-full;
-                background: scroll-touch.pressed
-                    ? DesignTokens.color-text-subtle
-                    : scroll-touch.has-hover
-                        ? DesignTokens.color-text-muted
-                        : DesignTokens.color-idle;
-                opacity: scroll-touch.has-hover || scroll-touch.pressed ? 0.9 : 0.62;
-                animate background { duration: 150ms; }
-                animate opacity { duration: 150ms; }
+            maximum: root.scroll-history-lines * 1px;
+            page-size: root.row-count * 1px;
+            value: -(root.scroll-history-lines - root.scroll-offset) * 1px;
+            wheel-changes-value: false;
+            scrolled => {
+                root.scroll-to(round(root.scroll-history-lines + self.value / 1px));
             }
-
-            scroll-touch := TouchArea {
-                width: 100%;
-                height: 100%;
-                mouse-cursor: pointer;
-
-                pointer-event(event) => {
-                    if (event.kind == PointerEventKind.down) {
-                        root.scroll-drag-offset = self.mouse-y >= scroll-thumb.y
-                            && self.mouse-y <= scroll-thumb.y + scroll-thumb.height
-                                ? self.mouse-y - scroll-thumb.y
-                                : scroll-thumb.height / 2;
-                    }
-                    if (event.kind == PointerEventKind.down
-                        || (event.kind == PointerEventKind.move && self.pressed)) {
-                        root.scroll-to(round(
-                            root.scroll-history-lines * (1 -
-                                max(
-                                    0px,
-                                    min(
-                                        parent.height - scroll-thumb.height,
-                                        self.mouse-y - root.scroll-drag-offset,
-                                    ),
-                                ) / max(1px, parent.height - scroll-thumb.height)
-                            )
-                        ));
-                    }
-                }
-
-                scroll-event(event) => {
-                    root.mouse-scroll(
-                        root.column-count - 1,
-                        min(root.row-count - 1, max(0, floor(self.mouse-y / root.cell-height))),
-                        event.delta-y / root.cell-height,
-                        event.modifiers.shift,
-                        event.modifiers.alt,
-                        event.modifiers.control,
-                    );
-                    accept
-                }
+            wheel(delta-y, mouse-y, shift, alt, control) => {
+                root.mouse-scroll(
+                    root.column-count - 1,
+                    min(root.row-count - 1, max(0, floor(mouse-y / root.cell-height))),
+                    delta-y / root.cell-height,
+                    shift,
+                    alt,
+                    control,
+                );
             }
         }
     }

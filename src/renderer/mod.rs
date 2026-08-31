@@ -43,6 +43,7 @@ pub(crate) struct GpuTerminalRenderer {
     cell_width: f32,
     cell_height: f32,
     font_size: f32,
+    font_family: String,
     /// 每个网格单元一个实例，主要承载背景、下划线和删除线。
     cell_instances: Vec<CellInstance>,
     instance_buffer: wgpu::Buffer,
@@ -79,6 +80,7 @@ impl GpuTerminalRenderer {
         cell_width: f32,
         cell_height: f32,
         font_size: f32,
+        font_family: &str,
     ) -> Self {
         let device = device.clone();
         let queue = queue.clone();
@@ -139,6 +141,7 @@ impl GpuTerminalRenderer {
             cell_width,
             cell_height,
             font_size,
+            font_family: font_family.to_owned(),
             cell_instances: vec![CellInstance::default(); columns.saturating_mul(rows)],
             instance_buffer,
             cursor_buffer,
@@ -177,6 +180,7 @@ impl GpuTerminalRenderer {
         cell_width: f32,
         cell_height: f32,
         font_size: f32,
+        font_family: &str,
     ) -> bool {
         let width = width.max(1);
         let height = height.max(1);
@@ -184,6 +188,7 @@ impl GpuTerminalRenderer {
         let metrics_changed = cell_width != self.cell_width
             || cell_height != self.cell_height
             || font_size != self.font_size;
+        let font_changed = self.font_family != font_family;
 
         let previous_cell_width = self.cell_width;
 
@@ -192,6 +197,8 @@ impl GpuTerminalRenderer {
         self.cell_width = cell_width;
         self.cell_height = cell_height;
         self.font_size = font_size;
+        self.font_family.clear();
+        self.font_family.push_str(font_family);
 
         if texture_changed {
             (self.texture, self.texture_view) = create_texture(&self.device, width, height);
@@ -205,7 +212,7 @@ impl GpuTerminalRenderer {
         if texture_changed || metrics_changed {
             self.update_row_metrics();
         }
-        if texture_changed || metrics_changed {
+        if texture_changed || metrics_changed || font_changed {
             self.dirty_rows = (0..self.rows).collect();
             self.update_viewport();
             self.render_pending = true;

@@ -2,6 +2,7 @@
 
 use crate::{
     MainWindow, TabData,
+    app::settings::ShellProfile,
     terminal::{FramePatch, TerminalController},
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
@@ -28,11 +29,15 @@ pub(super) struct TabManager {
     pub(super) sessions: Vec<TerminalSession>,
     pub(super) active: usize,
     pub(super) next_id: i32,
+    pub(super) settings_open: bool,
+    pub(super) settings_active: bool,
 }
 
 impl TabManager {
     pub(super) fn active_session(&self) -> Option<&TerminalSession> {
-        self.sessions.get(self.active)
+        (!self.settings_active)
+            .then(|| self.sessions.get(self.active))
+            .flatten()
     }
 
     pub(super) fn active_controller(&self) -> Option<Rc<TerminalController>> {
@@ -51,6 +56,7 @@ pub(super) fn create_session(
     id: i32,
     columns: usize,
     rows: usize,
+    profile: Option<&ShellProfile>,
 ) -> io::Result<TerminalSession> {
     let weak_ui = ui.as_weak();
     let controller = Rc::new(TerminalController::new(
@@ -58,6 +64,7 @@ pub(super) fn create_session(
         rows,
         ui.get_cell_width(),
         ui.get_cell_height(),
+        profile,
         move || {
             let weak_ui = weak_ui.clone();
             let _ = slint::invoke_from_event_loop(move || {
@@ -87,11 +94,26 @@ pub(super) fn sync_tab_ui(ui: &MainWindow, manager: &TabManager) {
             id: session.id,
             title: session.title.clone(),
             terminal_active: session.terminal_active,
+            is_settings: false,
         })
+        .chain(manager.settings_open.then_some(TabData {
+            id: -1,
+            title: "设置".into(),
+            terminal_active: false,
+            is_settings: true,
+        }))
         .collect::<Vec<_>>();
     ui.set_tabs(ModelRc::new(VecModel::from(model)));
+    ui.set_settings_active(manager.settings_active);
+    if manager.settings_active {
+        ui.set_active_tab_id(-1);
+        ui.set_active_tab_index(manager.sessions.len().min(i32::MAX as usize) as i32);
+        ui.set_terminal_title("设置".into());
+        return;
+    }
     if let Some(active) = manager.active_session() {
         ui.set_active_tab_id(active.id);
+        ui.set_active_tab_index(manager.active.min(i32::MAX as usize) as i32);
         ui.set_terminal_title(active.title.clone());
         ui.set_terminal_active(active.terminal_active);
         ui.set_exit_message(active.exit_message.clone());
@@ -105,6 +127,7 @@ pub(super) fn add_tab(
     ui: &MainWindow,
     tabs: &Rc<RefCell<TabManager>>,
     awaiting_full_frame: &Rc<Cell<bool>>,
+    profile: Option<&ShellProfile>,
 ) {
     let id = {
         let mut manager = tabs.borrow_mut();
@@ -117,6 +140,7 @@ pub(super) fn add_tab(
         id,
         ui.get_viewport_columns().max(2) as usize,
         ui.get_viewport_rows().max(1) as usize,
+        profile,
     ) {
         Ok(session) => session,
         Err(error) => {
@@ -128,6 +152,7 @@ pub(super) fn add_tab(
     let mut manager = tabs.borrow_mut();
     manager.sessions.push(session);
     manager.active = manager.sessions.len() - 1;
+    manager.settings_active = false;
     sync_tab_ui(ui, &manager);
     drop(manager);
     awaiting_full_frame.set(true);
@@ -148,11 +173,16 @@ pub(super) fn close_tab(
             return;
         };
         let removed = manager.sessions.remove(index);
-        if manager.sessions.is_empty() {
+        if manager.sessions.is_empty() && !manager.settings_open {
             (removed, None, true)
         } else {
-            if index < manager.active || manager.active >= manager.sessions.len() {
+            if !manager.sessions.is_empty()
+                && (index < manager.active || manager.active >= manager.sessions.len())
+            {
                 manager.active = manager.active.saturating_sub(1);
+            }
+            if manager.sessions.is_empty() {
+                manager.settings_active = true;
             }
             sync_tab_ui(ui, &manager);
             (removed, manager.active_controller(), false)

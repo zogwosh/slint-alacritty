@@ -11,6 +11,7 @@ use super::{
     mouse::{encode_mouse_button_code, encode_mouse_report, scroll_lines, visible_point},
     notifier::Notifier,
 };
+use crate::app::settings::ShellProfile;
 use alacritty_terminal::{
     event::{EventListener, WindowSize},
     event_loop::{EventLoop, EventLoopSender, Msg},
@@ -19,7 +20,7 @@ use alacritty_terminal::{
     selection::{Selection, SelectionRange, SelectionType},
     sync::FairMutex,
     term::{Config, Term},
-    tty::{self, Options},
+    tty::{self, Options, Shell},
 };
 use std::{
     borrow::Cow,
@@ -68,6 +69,7 @@ impl TerminalBackend {
         cell_width: f32,
         cell_height: f32,
         worker_sender: Sender<WorkerMessage>,
+        profile: Option<&ShellProfile>,
     ) -> io::Result<Self> {
         let size = TerminalSize { columns, rows };
         let cell_width = cell_width.ceil() as u16;
@@ -81,7 +83,15 @@ impl TerminalBackend {
         )));
 
         tty::setup_env();
-        let options = Options::default();
+        let mut options = Options::default();
+        if let Some(profile) = profile {
+            options.shell = Some(Shell::new(
+                profile.program.clone(),
+                profile.arguments.clone(),
+            ));
+            options.working_directory = profile.working_directory.clone();
+            options.env = profile.environment.clone();
+        }
         let pty = tty::new(&options, window_size, 0)?;
         let event_loop = EventLoop::new(
             terminal.clone(),

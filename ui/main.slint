@@ -1,12 +1,15 @@
 import { DesignTokens } from "design-tokens.slint";
-import { TabData } from "models.slint";
+import { Palette } from "std-widgets.slint";
+import { ShellProfileData, ShortcutData, TabData } from "models.slint";
 import { TitleBar } from "components/title-bar.slint";
+import { SettingsView } from "settings-view.slint";
 import { TerminalView } from "terminal-view.slint";
 
-export { TabData }
+export { ShellProfileData, ShortcutData, TabData }
 
 // 应用根窗口：负责组合标题栏和终端视图，并向 Rust 暴露统一接口。
 export component MainWindow inherits Window {
+    init => { Palette.color-scheme = ColorScheme.dark; }
     title: root.terminal-title;
     preferred-width: 900px;
     preferred-height: 540px;
@@ -25,6 +28,24 @@ export component MainWindow inherits Window {
     in property <int> scroll-history-lines;
     in property <[TabData]> tabs;
     in property <int> active-tab-id: -1;
+    in property <int> active-tab-index: -1;
+    in property <bool> settings-active;
+    in property <[ShellProfileData]> shell-profiles;
+    in property <[ShortcutData]> shortcuts;
+    in-out property <int> settings-section;
+    in-out property <int> selected-profile-id: -1;
+    in-out property <string> profile-name-draft;
+    in-out property <string> profile-program-draft;
+    in-out property <string> profile-arguments-draft;
+    in-out property <string> profile-working-directory-draft;
+    in-out property <string> profile-environment-draft;
+    in property <[string]> mono-fonts;
+    in property <string> terminal-font-family: "Cascadia Mono";
+    in property <int> terminal-font-size: 15;
+    in-out property <int> settings-font-index;
+    in-out property <int> settings-font-size: 15;
+    in property <string> settings-message;
+    in property <bool> settings-message-error;
     // 输入回调参数依次为文本、Ctrl、Alt、Shift、AltGr。
     callback key-input(string, bool, bool, bool, bool);
     callback viewport-resized(int, int);
@@ -33,8 +54,16 @@ export component MainWindow inherits Window {
     callback mouse-scroll(int, int, float, bool, bool, bool);
     callback scroll-to(int);
     callback new-tab;
+    callback open-settings;
     callback select-tab(int);
     callback close-tab(int);
+    callback select-profile(int);
+    callback new-profile;
+    callback save-profile(int, string, string, string, string, string);
+    callback set-default-profile(int);
+    callback remove-profile(int);
+    callback save-font(int, int);
+    callback save-shortcut(string, string, bool);
     callback drag-window(float, float);
 
     // Rust 读取这些派生尺寸来配置 PTY 网格和渲染纹理。
@@ -55,11 +84,13 @@ export component MainWindow inherits Window {
             width: 100%;
             tabs: root.tabs;
             active-tab-id: root.active-tab-id;
+            active-tab-index: root.active-tab-index;
             close-window => { root.close(); }
             minimize-window => { root.minimized = true; }
             toggle-maximize => { root.maximized = !root.maximized; }
             drag-window(delta-x, delta-y) => { root.drag-window(delta-x, delta-y); }
             new-tab => { root.new-tab(); }
+            open-settings => { root.open-settings(); }
             select-tab(id) => { root.select-tab(id); }
             close-tab(id) => { root.close-tab(id); }
         }
@@ -74,6 +105,9 @@ export component MainWindow inherits Window {
             exit-message: root.exit-message;
             scroll-offset: root.scroll-offset;
             scroll-history-lines: root.scroll-history-lines;
+            font-family: root.terminal-font-family;
+            font-size: root.terminal-font-size * 1px;
+            visible: !root.settings-active;
             key-input(text, control, alt, shift, altgr) => {
                 root.key-input(text, control, alt, shift, altgr);
             }
@@ -87,6 +121,39 @@ export component MainWindow inherits Window {
                 root.mouse-scroll(column, row, lines, shift, alt, control);
             }
             scroll-to(offset) => { root.scroll-to(offset); }
+        }
+
+        settings-view := SettingsView {
+            x: DesignTokens.space-2-5;
+            y: title-bar.height + DesignTokens.space-2;
+            width: parent.width - 2 * DesignTokens.space-2-5;
+            height: parent.height - title-bar.height - DesignTokens.space-2 - DesignTokens.space-2-5;
+            visible: root.settings-active;
+            profiles: root.shell-profiles;
+            shortcuts: root.shortcuts;
+            section <=> root.settings-section;
+            selected-profile-id <=> root.selected-profile-id;
+            profile-name <=> root.profile-name-draft;
+            profile-program <=> root.profile-program-draft;
+            profile-arguments <=> root.profile-arguments-draft;
+            profile-working-directory <=> root.profile-working-directory-draft;
+            profile-environment <=> root.profile-environment-draft;
+            mono-fonts: root.mono-fonts;
+            font-index <=> root.settings-font-index;
+            font-size <=> root.settings-font-size;
+            message: root.settings-message;
+            message-error: root.settings-message-error;
+            select-profile(id) => { root.select-profile(id); }
+            new-profile => { root.new-profile(); }
+            save-profile(id, name, program, arguments, working-directory, environment) => {
+                root.save-profile(id, name, program, arguments, working-directory, environment);
+            }
+            set-default-profile(id) => { root.set-default-profile(id); }
+            remove-profile(id) => { root.remove-profile(id); }
+            save-font(index, size) => { root.save-font(index, size); }
+            save-shortcut(action, shortcut, pass-through) => {
+                root.save-shortcut(action, shortcut, pass-through);
+            }
         }
     }
 }

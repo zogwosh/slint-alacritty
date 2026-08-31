@@ -118,6 +118,7 @@ impl GpuTerminalRenderer {
                 metrics,
                 self.cell_width,
                 self.cell_height,
+                &self.font_family,
                 cell,
             );
             visible_cells += usize::from(buffer.is_some());

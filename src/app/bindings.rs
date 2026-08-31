@@ -1,8 +1,9 @@
 //! Slint 输入、标签页、尺寸和窗口控制回调。
 
 use super::{
-    input::{KeyAction, key_action, normalize_key},
+    input::{KeyAction, configured_key_action, normalize_key},
     sessions::{TabManager, add_tab, close_tab, sync_tab_ui},
+    settings::{AppSettings, build_profile, sync_profile_draft, sync_settings_ui, update_shortcut},
 };
 use crate::MainWindow;
 use slint::{ComponentHandle, PhysicalPosition};
@@ -15,39 +16,48 @@ use std::{
 pub(super) fn connect_input(
     ui: &MainWindow,
     tabs: Rc<RefCell<TabManager>>,
+    settings: Rc<RefCell<AppSettings>>,
     awaiting_full_frame: Rc<Cell<bool>>,
 ) {
     let weak_ui = ui.as_weak();
     ui.on_key_input(move |text, control, alt, shift, altgr| {
-        let action = key_action(text.as_str(), control, alt, shift, altgr);
-        match action {
-            KeyAction::NewTab => {
+        let decision = configured_key_action(
+            &settings.borrow(),
+            text.as_str(),
+            control,
+            alt,
+            shift,
+            altgr,
+        );
+        match decision.action {
+            Some(KeyAction::NewTab) => {
                 if let Some(ui) = weak_ui.upgrade() {
-                    add_tab(&ui, &tabs, &awaiting_full_frame);
+                    let settings = settings.borrow();
+                    add_tab(&ui, &tabs, &awaiting_full_frame, settings.default_profile());
                 }
             }
-            KeyAction::CloseTab => {
+            Some(KeyAction::CloseTab) => {
                 let active_id = tabs.borrow().active_id();
                 if let (Some(ui), Some(id)) = (weak_ui.upgrade(), active_id) {
                     close_tab(&ui, &tabs, &awaiting_full_frame, id);
                 }
             }
-            KeyAction::Copy => {
+            Some(KeyAction::Copy) => {
                 if let Some(controller) = tabs.borrow().active_controller() {
                     controller.copy_selection();
                 }
             }
-            KeyAction::SelectAll => {
+            Some(KeyAction::SelectAll) => {
                 if let Some(controller) = tabs.borrow().active_controller() {
                     controller.select_all();
                 }
             }
-            KeyAction::Paste => {
+            Some(KeyAction::Paste) => {
                 if let Some(controller) = tabs.borrow().active_controller() {
                     controller.paste_clipboard();
                 }
             }
-            KeyAction::Interrupt => {
+            Some(KeyAction::Interrupt) => {
                 if let Some(controller) = tabs.borrow().active_controller() {
                     controller.send_key(
                         crate::terminal::KeyInput::Text("c".into()),
@@ -58,15 +68,20 @@ pub(super) fn connect_input(
                     );
                 }
             }
-            KeyAction::Ignore => {}
-            KeyAction::Forward => {
-                if let (Some(controller), Some(input)) = (
-                    tabs.borrow().active_controller(),
-                    normalize_key(text.as_str()),
-                ) {
-                    controller.send_key(input, control, alt, shift, altgr);
+            Some(KeyAction::Quit) => {
+                if let Some(ui) = weak_ui.upgrade() {
+                    let _ = ui.window().hide();
                 }
             }
+            None => {}
+        }
+        if decision.forward
+            && let (Some(controller), Some(input)) = (
+                tabs.borrow().active_controller(),
+                normalize_key(text.as_str()),
+            )
+        {
+            controller.send_key(input, control, alt, shift, altgr);
         }
     });
 }
@@ -151,15 +166,31 @@ pub(super) fn connect_resize(ui: &MainWindow, tabs: Rc<RefCell<TabManager>>) {
 pub(super) fn connect_tabs(
     ui: &MainWindow,
     tabs: Rc<RefCell<TabManager>>,
+    settings: Rc<RefCell<AppSettings>>,
+    mono_fonts: Rc<Vec<String>>,
     awaiting_full_frame: Rc<Cell<bool>>,
 ) {
     let weak_ui = ui.as_weak();
     let new_tabs = tabs.clone();
+    let new_settings = settings.clone();
     let new_awaiting = awaiting_full_frame.clone();
     ui.on_new_tab(move || {
         if let Some(ui) = weak_ui.upgrade() {
-            add_tab(&ui, &new_tabs, &new_awaiting);
+            let settings = new_settings.borrow();
+            add_tab(&ui, &new_tabs, &new_awaiting, settings.default_profile());
         }
+    });
+
+    let weak_ui = ui.as_weak();
+    let settings_tabs = tabs.clone();
+    ui.on_open_settings(move || {
+        let Some(ui) = weak_ui.upgrade() else {
+            return;
+        };
+        let mut manager = settings_tabs.borrow_mut();
+        manager.settings_open = true;
+        manager.settings_active = true;
+        sync_tab_ui(&ui, &manager);
     });
 
     let weak_ui = ui.as_weak();
@@ -170,13 +201,19 @@ pub(super) fn connect_tabs(
             return;
         };
         let mut manager = select_tabs.borrow_mut();
+        if id == -1 && manager.settings_open {
+            manager.settings_active = true;
+            sync_tab_ui(&ui, &manager);
+            return;
+        }
         let Some(index) = manager.sessions.iter().position(|session| session.id == id) else {
             return;
         };
-        if index == manager.active {
+        if index == manager.active && !manager.settings_active {
             return;
         }
         manager.active = index;
+        manager.settings_active = false;
         sync_tab_ui(&ui, &manager);
         let controller = manager.active_controller();
         drop(manager);
@@ -193,9 +230,226 @@ pub(super) fn connect_tabs(
     });
 
     let weak_ui = ui.as_weak();
+    let close_tabs = tabs.clone();
+    let close_awaiting = awaiting_full_frame.clone();
     ui.on_close_tab(move |id| {
-        if let Some(ui) = weak_ui.upgrade() {
-            close_tab(&ui, &tabs, &awaiting_full_frame, id);
+        let Some(ui) = weak_ui.upgrade() else {
+            return;
+        };
+        if id == -1 {
+            let mut manager = close_tabs.borrow_mut();
+            manager.settings_open = false;
+            manager.settings_active = false;
+            if manager.sessions.is_empty() {
+                drop(manager);
+                let _ = ui.window().hide();
+                return;
+            }
+            sync_tab_ui(&ui, &manager);
+            let controller = manager.active_controller();
+            drop(manager);
+            close_awaiting.set(true);
+            if let Some(controller) = controller {
+                controller.request_full_redraw();
+            }
+            ui.invoke_frame_ready();
+        } else {
+            close_tab(&ui, &close_tabs, &close_awaiting, id);
+        }
+    });
+
+    let weak_ui = ui.as_weak();
+    let select_settings = settings.clone();
+    ui.on_select_profile(move |id| {
+        let Some(ui) = weak_ui.upgrade() else {
+            return;
+        };
+        let settings = select_settings.borrow();
+        sync_profile_draft(&ui, settings.profile(id));
+        ui.set_settings_message("".into());
+    });
+
+    let weak_ui = ui.as_weak();
+    ui.on_new_profile(move || {
+        let Some(ui) = weak_ui.upgrade() else {
+            return;
+        };
+        sync_profile_draft(&ui, None);
+        ui.set_settings_message_error(false);
+        ui.set_settings_message("填写信息后保存为新的 Shell Profile。".into());
+    });
+
+    let weak_ui = ui.as_weak();
+    let save_settings = settings.clone();
+    let save_fonts = mono_fonts.clone();
+    ui.on_save_profile(
+        move |id, name, program, arguments, working_directory, environment| {
+            let Some(ui) = weak_ui.upgrade() else {
+                return;
+            };
+            let mut settings = save_settings.borrow_mut();
+            let mut profile = match build_profile(
+                id,
+                name.as_str(),
+                program.as_str(),
+                arguments.as_str(),
+                working_directory.as_str(),
+                environment.as_str(),
+            ) {
+                Ok(profile) => profile,
+                Err(message) => {
+                    ui.set_settings_message_error(true);
+                    ui.set_settings_message(message.into());
+                    return;
+                }
+            };
+            let resolved_id = if id < 0 {
+                settings.allocate_profile_id()
+            } else {
+                id
+            };
+            profile.id = resolved_id;
+            if let Some(existing) = settings.profile_mut(resolved_id) {
+                *existing = profile;
+            } else {
+                settings.profiles.push(profile);
+            }
+            if settings.default_profile_id.is_none() {
+                settings.default_profile_id = Some(resolved_id);
+            }
+            match settings.save() {
+                Ok(()) => {
+                    ui.set_settings_message_error(false);
+                    ui.set_settings_message("Shell Profile 已保存。".into());
+                    sync_settings_ui(&ui, &settings, &save_fonts);
+                    sync_profile_draft(&ui, settings.profile(resolved_id));
+                }
+                Err(error) => {
+                    ui.set_settings_message_error(true);
+                    ui.set_settings_message(format!("错误：保存设置失败：{error}").into());
+                }
+            }
+        },
+    );
+
+    let weak_ui = ui.as_weak();
+    let default_settings = settings.clone();
+    let default_fonts = mono_fonts.clone();
+    ui.on_set_default_profile(move |id| {
+        let Some(ui) = weak_ui.upgrade() else {
+            return;
+        };
+        let mut settings = default_settings.borrow_mut();
+        if settings.profile(id).is_none() {
+            return;
+        }
+        settings.default_profile_id = Some(id);
+        match settings.save() {
+            Ok(()) => {
+                ui.set_settings_message_error(false);
+                ui.set_settings_message("默认 Profile 已更新；现有终端不会被重启。".into());
+                sync_settings_ui(&ui, &settings, &default_fonts);
+            }
+            Err(error) => {
+                ui.set_settings_message_error(true);
+                ui.set_settings_message(format!("错误：保存设置失败：{error}").into());
+            }
+        }
+    });
+
+    let weak_ui = ui.as_weak();
+    let remove_settings = settings.clone();
+    let remove_fonts = mono_fonts.clone();
+    ui.on_remove_profile(move |id| {
+        let Some(ui) = weak_ui.upgrade() else {
+            return;
+        };
+        let mut settings = remove_settings.borrow_mut();
+        settings.profiles.retain(|profile| profile.id != id);
+        if settings.default_profile_id == Some(id) {
+            settings.default_profile_id = settings.profiles.first().map(|profile| profile.id);
+        }
+        match settings.save() {
+            Ok(()) => {
+                ui.set_settings_message_error(false);
+                ui.set_settings_message("Shell Profile 已删除。".into());
+                sync_settings_ui(&ui, &settings, &remove_fonts);
+                let next_profile = settings
+                    .default_profile()
+                    .or_else(|| settings.profiles.first());
+                sync_profile_draft(&ui, next_profile);
+            }
+            Err(error) => {
+                ui.set_settings_message_error(true);
+                ui.set_settings_message(format!("错误：保存设置失败：{error}").into());
+            }
+        }
+    });
+
+    let font_settings = settings.clone();
+    let font_fonts = mono_fonts.clone();
+    let weak_ui = ui.as_weak();
+    ui.on_save_font(move |index, size| {
+        let Some(ui) = weak_ui.upgrade() else {
+            return;
+        };
+        let Some(family) = font_fonts.get(index.max(0) as usize) else {
+            ui.set_settings_message_error(true);
+            ui.set_settings_message("错误：请选择有效的等宽字体".into());
+            return;
+        };
+        let mut settings = font_settings.borrow_mut();
+        settings.font_family = family.clone();
+        settings.font_size = size.clamp(8, 36);
+        match settings.save() {
+            Ok(()) => {
+                ui.set_settings_message_error(false);
+                sync_settings_ui(&ui, &settings, &font_fonts);
+                ui.set_settings_message("字体设置已应用。".into());
+                awaiting_full_frame.set(true);
+                if let Some(controller) = tabs.borrow().active_controller() {
+                    controller.resize(
+                        ui.get_viewport_columns().max(2) as usize,
+                        ui.get_viewport_rows().max(1) as usize,
+                    );
+                    controller.request_full_redraw();
+                }
+                ui.window().request_redraw();
+                ui.invoke_frame_ready();
+            }
+            Err(error) => {
+                ui.set_settings_message_error(true);
+                ui.set_settings_message(format!("错误：保存设置失败：{error}").into());
+            }
+        }
+    });
+
+    let weak_ui = ui.as_weak();
+    ui.on_save_shortcut(move |action, shortcut, pass_through| {
+        let Some(ui) = weak_ui.upgrade() else {
+            return;
+        };
+        let mut settings = settings.borrow_mut();
+        if let Err(message) = update_shortcut(
+            &mut settings,
+            action.as_str(),
+            shortcut.as_str(),
+            pass_through,
+        ) {
+            ui.set_settings_message_error(true);
+            ui.set_settings_message(message.into());
+            return;
+        }
+        match settings.save() {
+            Ok(()) => {
+                ui.set_settings_message_error(false);
+                ui.set_settings_message("快捷键设置已应用。".into());
+                sync_settings_ui(&ui, &settings, &mono_fonts);
+            }
+            Err(error) => {
+                ui.set_settings_message_error(true);
+                ui.set_settings_message(format!("错误：保存设置失败：{error}").into());
+            }
         }
     });
 }

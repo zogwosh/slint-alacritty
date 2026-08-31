@@ -5,8 +5,6 @@ use glyphon::{
     Attrs, Buffer, Color as GlyphColor, Family, FontSystem, Metrics, Shaping, Style, Weight,
 };
 
-const FONT_FAMILY: &str = "Cascadia Mono";
-
 /// 单个终端字符格的 glyphon 缓冲区；宽字符可以覆盖多个网格列。
 pub(super) struct CellTextBuffer {
     pub(super) buffer: Buffer,
@@ -38,6 +36,7 @@ pub(super) fn create_cell_buffer(
     metrics: Metrics,
     cell_width: f32,
     cell_height: f32,
+    font_family: &str,
     cell: &TerminalCellPatch,
 ) -> Option<CellTextBuffer> {
     if cell.hidden || cell.text.is_empty() || cell.text.chars().all(|character| character == ' ') {
@@ -53,7 +52,7 @@ pub(super) fn create_cell_buffer(
     buffer.set_monospace_width(font_system, Some(cell_width));
 
     let attrs = Attrs::new()
-        .family(Family::Name(FONT_FAMILY))
+        .family(Family::Name(font_family))
         .color(glyph_color(cell.foreground))
         .weight(if cell.bold {
             Weight::BOLD

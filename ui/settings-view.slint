@@ -1,0 +1,424 @@
+import { Button, CheckBox, ComboBox, LineEdit, SpinBox, TextEdit } from "std-widgets.slint";
+import { DesignTokens } from "design-tokens.slint";
+import { ShellProfileData, ShortcutData } from "models.slint";
+import { AppScrollView } from "components/scroll-view.slint";
+
+component SidebarItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback selected;
+    height: 36px;
+    border-radius: DesignTokens.radius-md;
+    background: root.active ? DesignTokens.color-surface-active
+        : touch.has-hover ? DesignTokens.color-surface-hover : transparent;
+
+    Text {
+        x: DesignTokens.space-3;
+        width: parent.width - 2 * DesignTokens.space-3;
+        height: 100%;
+        text: root.label;
+        color: root.active ? DesignTokens.color-text : DesignTokens.color-text-muted;
+        font-family: DesignTokens.font-ui;
+        font-size: DesignTokens.text-xs;
+        font-weight: root.active ? 600 : 400;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.selected(); } }
+}
+
+component FormLabel inherits Text {
+    color: DesignTokens.color-text-subtle;
+    font-family: DesignTokens.font-ui;
+    font-size: DesignTokens.text-xs;
+    vertical-alignment: center;
+}
+
+// 左侧负责设置分类和 Profile 导航，右侧显示当前分类的可滚动详情。
+export component SettingsView inherits Rectangle {
+    in property <[ShellProfileData]> profiles;
+    in-out property <int> section;
+    in-out property <int> selected-profile-id: -1;
+    in-out property <string> profile-name;
+    in-out property <string> profile-program;
+    in-out property <string> profile-arguments;
+    in-out property <string> profile-working-directory;
+    in-out property <string> profile-environment;
+    in property <[string]> mono-fonts;
+    in property <[ShortcutData]> shortcuts;
+    in-out property <int> font-index;
+    in-out property <int> font-size: 15;
+    in property <string> message;
+    in property <bool> message-error;
+    callback select-profile(int);
+    callback new-profile;
+    callback save-profile(int, string, string, string, string, string);
+    callback set-default-profile(int);
+    callback remove-profile(int);
+    callback save-font(int, int);
+    callback save-shortcut(string, string, bool);
+
+    background: DesignTokens.color-canvas;
+    border-radius: DesignTokens.radius-lg;
+    clip: true;
+
+    HorizontalLayout {
+        spacing: DesignTokens.space-2;
+
+        sidebar := Rectangle {
+            min-width: 210px;
+            preferred-width: 224px;
+            max-width: 260px;
+            border-radius: DesignTokens.radius-lg;
+            background: DesignTokens.color-surface;
+            clip: true;
+
+            VerticalLayout {
+                padding: DesignTokens.space-3;
+                spacing: DesignTokens.space-2;
+
+                Text {
+                    text: "设置";
+                    color: DesignTokens.color-text;
+                    font-family: DesignTokens.font-ui;
+                    font-size: DesignTokens.text-lg;
+                    font-weight: 600;
+                }
+                SidebarItem {
+                    label: "Shell 配置档案";
+                    active: root.section == 0;
+                    selected => { root.section = 0; }
+                }
+                AppScrollView {
+                    min-height: 100px;
+                    vertical-stretch: 1;
+                    viewport-width: self.visible-width;
+                    viewport-height: max(self.visible-height, profile-list.preferred-height);
+
+                    profile-list := VerticalLayout {
+                        width: parent.viewport-width;
+                        spacing: DesignTokens.space-1;
+
+                        for profile in root.profiles : SidebarItem {
+                            label: profile.is-default ? "●  \{profile.name}" : profile.name;
+                            active: root.section == 0 && profile.id == root.selected-profile-id;
+                            selected => {
+                                root.section = 0;
+                                root.select-profile(profile.id);
+                            }
+                        }
+                        if root.profiles.length == 0 : Text {
+                            text: "尚无 Profile";
+                            color: DesignTokens.color-text-muted;
+                            font-family: DesignTokens.font-ui;
+                            font-size: DesignTokens.text-xs;
+                        }
+                    }
+                }
+                Button {
+                    text: "+ 新建 Profile";
+                    clicked => { root.section = 0; root.new-profile(); }
+                }
+                Rectangle { height: 1px; background: DesignTokens.color-border; }
+                SidebarItem {
+                    label: "外观";
+                    active: root.section == 1;
+                    selected => { root.section = 1; }
+                }
+                SidebarItem {
+                    label: "快捷键";
+                    active: root.section == 2;
+                    selected => { root.section = 2; }
+                }
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            background: DesignTokens.color-canvas;
+
+            if root.section == 0 : AppScrollView {
+                width: 100%; height: 100%;
+                viewport-width: self.visible-width;
+                viewport-height: max(self.visible-height, profile-content.height);
+
+                profile-content := Rectangle {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.viewport-width;
+                    height: profile-form.preferred-height + 2 * DesignTokens.space-4;
+
+                    profile-form := VerticalLayout {
+                        x: DesignTokens.space-5;
+                        y: DesignTokens.space-4;
+                        width: parent.width - 2 * DesignTokens.space-5;
+                        height: self.preferred-height;
+                        spacing: DesignTokens.space-3;
+
+                        Text {
+                            text: root.selected-profile-id < 0 ? "新建 Shell Profile" : "编辑 Shell Profile";
+                            color: DesignTokens.color-text;
+                            font-family: DesignTokens.font-ui;
+                            font-size: DesignTokens.text-lg;
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: "每个 Profile 保存 Shell 程序、启动参数、默认工作目录和环境变量。新标签页使用默认 Profile。";
+                            color: DesignTokens.color-text-muted;
+                            font-family: DesignTokens.font-ui;
+                            font-size: DesignTokens.text-xs;
+                            wrap: word-wrap;
+                        }
+                        GridLayout {
+                            spacing: DesignTokens.space-2;
+                            Row {
+                                FormLabel { text: "名称"; }
+                                LineEdit { text <=> root.profile-name; placeholder-text: "PowerShell 7"; }
+                            }
+                            Row {
+                                FormLabel { text: "程序路径"; }
+                                LineEdit {
+                                    text <=> root.profile-program;
+                                    placeholder-text: "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+                                }
+                            }
+                            Row {
+                                FormLabel { text: "工作目录"; }
+                                LineEdit {
+                                    text <=> root.profile-working-directory;
+                                    placeholder-text: "留空则继承应用当前目录";
+                                }
+                            }
+                        }
+                        FormLabel { text: "启动参数（每行一个）"; }
+                        TextEdit {
+                            min-height: 92px; preferred-height: 92px;
+                            text <=> root.profile-arguments;
+                            placeholder-text: "-NoLogo\n-NoExit";
+                            wrap: no-wrap;
+                            font-family: DesignTokens.font-mono;
+                            font-size: DesignTokens.text-xs;
+                        }
+                        FormLabel { text: "环境变量（每行 KEY=VALUE）"; }
+                        TextEdit {
+                            min-height: 112px; preferred-height: 112px;
+                            text <=> root.profile-environment;
+                            placeholder-text: "TERM=xterm-256color\nMY_VARIABLE=value";
+                            wrap: no-wrap;
+                            font-family: DesignTokens.font-mono;
+                            font-size: DesignTokens.text-xs;
+                        }
+                        HorizontalLayout {
+                            spacing: DesignTokens.space-2;
+                            alignment: end;
+                            Button {
+                                text: "删除";
+                                enabled: root.selected-profile-id >= 0;
+                                clicked => { root.remove-profile(root.selected-profile-id); }
+                            }
+                            Button {
+                                text: "设为默认";
+                                enabled: root.selected-profile-id >= 0;
+                                clicked => { root.set-default-profile(root.selected-profile-id); }
+                            }
+                            Button {
+                                text: "保存 Profile";
+                                primary: true;
+                                enabled: !root.profile-name.is-empty && !root.profile-program.is-empty;
+                                clicked => {
+                                    root.save-profile(
+                                        root.selected-profile-id, root.profile-name,
+                                        root.profile-program, root.profile-arguments,
+                                        root.profile-working-directory, root.profile-environment,
+                                    );
+                                }
+                            }
+                        }
+                        if !root.message.is-empty : Text {
+                            text: root.message;
+                            color: root.message-error ? DesignTokens.color-warning : DesignTokens.color-success;
+                            font-family: DesignTokens.font-ui;
+                            font-size: DesignTokens.text-xs;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+
+            if root.section == 1 : AppScrollView {
+                width: 100%; height: 100%;
+                viewport-width: self.visible-width;
+                viewport-height: max(self.visible-height, appearance-content.height);
+
+                appearance-content := Rectangle {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.viewport-width;
+                    height: appearance-form.preferred-height + 2 * DesignTokens.space-4;
+
+                    appearance-form := VerticalLayout {
+                        x: DesignTokens.space-5;
+                        y: DesignTokens.space-4;
+                        width: parent.width - 2 * DesignTokens.space-5;
+                        height: self.preferred-height;
+                        spacing: DesignTokens.space-3;
+
+                        Text {
+                            text: "外观";
+                            color: DesignTokens.color-text;
+                            font-family: DesignTokens.font-ui;
+                            font-size: DesignTokens.text-lg;
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: "字体列表来自系统中已安装并被识别为等宽字体的字体族。";
+                            color: DesignTokens.color-text-muted;
+                            font-family: DesignTokens.font-ui;
+                            font-size: DesignTokens.text-xs;
+                        }
+                        GridLayout {
+                            spacing: DesignTokens.space-2;
+                            Row {
+                                FormLabel { text: "终端字体"; }
+                                ComboBox { model: root.mono-fonts; current-index <=> root.font-index; }
+                            }
+                            Row {
+                                FormLabel { text: "字号"; }
+                                SpinBox { minimum: 8; maximum: 36; value <=> root.font-size; }
+                            }
+                        }
+                        Rectangle {
+                            height: 120px;
+                            border-width: 1px;
+                            border-color: DesignTokens.color-border;
+                            border-radius: DesignTokens.radius-lg;
+                            background: DesignTokens.color-surface;
+                            Text {
+                                x: DesignTokens.space-4; y: DesignTokens.space-3;
+                                width: parent.width - 2 * DesignTokens.space-4;
+                                height: parent.height - 2 * DesignTokens.space-3;
+                                text: "The quick brown fox jumps over the lazy dog.\n0123456789  中文等宽字体预览";
+                                color: DesignTokens.color-text;
+                                font-family: root.font-index >= 0 && root.font-index < root.mono-fonts.length
+                                    ? root.mono-fonts[root.font-index] : DesignTokens.font-mono;
+                                font-size: root.font-size * 1px;
+                                wrap: word-wrap;
+                                vertical-alignment: center;
+                            }
+                        }
+                        HorizontalLayout {
+                            alignment: end;
+                            Button {
+                                text: "应用字体";
+                                primary: true;
+                                enabled: root.font-index >= 0 && root.font-index < root.mono-fonts.length;
+                                clicked => { root.save-font(root.font-index, root.font-size); }
+                            }
+                        }
+                        if !root.message.is-empty : Text {
+                            text: root.message;
+                            color: root.message-error ? DesignTokens.color-warning : DesignTokens.color-success;
+                            font-family: DesignTokens.font-ui;
+                            font-size: DesignTokens.text-xs;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+
+            if root.section == 2 : AppScrollView {
+                width: 100%; height: 100%;
+                viewport-width: self.visible-width;
+                viewport-height: max(self.visible-height, shortcut-content.height);
+
+                shortcut-content := Rectangle {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.viewport-width;
+                    height: shortcut-form.preferred-height + 2 * DesignTokens.space-4;
+
+                    shortcut-form := VerticalLayout {
+                        x: DesignTokens.space-5;
+                        y: DesignTokens.space-4;
+                        width: parent.width - 2 * DesignTokens.space-5;
+                        height: self.preferred-height;
+                        spacing: DesignTokens.space-3;
+
+                        Text {
+                            text: "快捷键";
+                            color: DesignTokens.color-text;
+                            font-family: DesignTokens.font-ui;
+                            font-size: DesignTokens.text-lg;
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: "未匹配的按键始终发送到终端。应用快捷键默认只执行应用操作；开启透传后会同时发送到终端。";
+                            color: DesignTokens.color-text-muted;
+                            font-family: DesignTokens.font-ui;
+                            font-size: DesignTokens.text-xs;
+                            wrap: word-wrap;
+                        }
+                        for shortcut in root.shortcuts : shortcut-row := Rectangle {
+                            property <string> shortcut-draft: shortcut.shortcut;
+                            property <bool> pass-through-draft: shortcut.pass-through;
+                            height: 82px;
+                            border-width: 1px;
+                            border-color: DesignTokens.color-border;
+                            border-radius: DesignTokens.radius-lg;
+                            background: DesignTokens.color-surface;
+
+                            HorizontalLayout {
+                                padding: DesignTokens.space-3;
+                                spacing: DesignTokens.space-3;
+
+                                Text {
+                                    min-width: 96px;
+                                    preferred-width: 112px;
+                                    text: shortcut.label;
+                                    color: DesignTokens.color-text;
+                                    font-family: DesignTokens.font-ui;
+                                    font-size: DesignTokens.text-sm;
+                                    vertical-alignment: center;
+                                }
+                                VerticalLayout {
+                                    spacing: DesignTokens.space-1;
+                                    LineEdit {
+                                        text <=> shortcut-row.shortcut-draft;
+                                        placeholder-text: "Ctrl+Shift+T";
+                                    }
+                                    Text {
+                                        text: "格式示例：Ctrl+C、Alt+C、Ctrl+Shift+T";
+                                        color: DesignTokens.color-text-muted;
+                                        font-family: DesignTokens.font-ui;
+                                        font-size: DesignTokens.text-2xs;
+                                    }
+                                }
+                                CheckBox {
+                                    text: "执行后透传";
+                                    checked <=> shortcut-row.pass-through-draft;
+                                }
+                                Button {
+                                    text: "保存";
+                                    clicked => {
+                                        root.save-shortcut(
+                                            shortcut.action,
+                                            shortcut-row.shortcut-draft,
+                                            shortcut-row.pass-through-draft,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        if !root.message.is-empty : Text {
+                            text: root.message;
+                            color: root.message-error ? DesignTokens.color-warning : DesignTokens.color-success;
+                            font-family: DesignTokens.font-ui;
+                            font-size: DesignTokens.text-xs;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

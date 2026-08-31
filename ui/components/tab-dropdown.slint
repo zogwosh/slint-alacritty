@@ -1,0 +1,159 @@
+import { DesignTokens } from "../design-tokens.slint";
+import { Icon, IconName } from "../icons/icon.slint";
+import { TabData } from "../models.slint";
+import { IconButton } from "icon-button.slint";
+
+// 标签页下拉菜单：在标签较多或溢出时提供完整列表和快速切换入口。
+export component TabDropdown inherits Rectangle {
+    in property <[TabData]> tabs;
+    in property <int> active-tab-id: -1;
+    callback select-tab(int);
+    callback open-settings;
+
+    private property <length> menu-header-height: 24px;
+    private property <length> menu-item-height: 30px;
+    private property <length> menu-content-height:
+        2 * DesignTokens.space-2
+            + root.menu-header-height
+            + (root.tabs.length + 1) * (root.menu-item-height + DesignTokens.space-1)
+            + DesignTokens.space-2;
+
+    // 组件位于 HorizontalLayout 中；必须声明布局约束，单独设置 width/height
+    // 会被父布局重新分配，导致它和旁边的 IconButton 尺寸不一致。
+    min-width: DesignTokens.add-button-width;
+    preferred-width: DesignTokens.add-button-width;
+    max-width: DesignTokens.add-button-width;
+    min-height: DesignTokens.tab-height;
+    preferred-height: DesignTokens.tab-height;
+    max-height: DesignTokens.tab-height;
+
+    trigger := IconButton {
+        width: 100%;
+        height: 100%;
+        icon: IconName.chevron-down;
+        icon-size: DesignTokens.icon-menu-chevron-size;
+        icon-color: DesignTokens.color-text-subtle;
+        accessible-role: button;
+        accessible-label: "标签页菜单";
+        accessible-action-default => { tab-menu.show(); }
+        activated => { tab-menu.show(); }
+    }
+
+    tab-menu := PopupWindow {
+        x: root.width - self.width;
+        y: root.height + DesignTokens.space-1;
+        width: 240px;
+        height: min(320px, root.menu-content-height);
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            border-width: 1px;
+            border-color: DesignTokens.color-border;
+            border-radius: DesignTokens.radius-lg;
+            background: DesignTokens.color-surface-active;
+            clip: true;
+
+            VerticalLayout {
+                padding: DesignTokens.space-2;
+                spacing: DesignTokens.space-1;
+
+                Text {
+                    height: root.menu-header-height;
+                    text: "标签页";
+                    color: DesignTokens.color-text-muted;
+                    font-family: DesignTokens.font-ui;
+                    font-size: DesignTokens.text-xs;
+                    vertical-alignment: center;
+                }
+
+                for tab in root.tabs : Rectangle {
+                    height: root.menu-item-height;
+                    visible: !tab.is-settings;
+                    border-radius: DesignTokens.radius-sm;
+                    background: item-touch.pressed
+                        ? DesignTokens.color-control-pressed
+                        : item-touch.has-hover ? DesignTokens.color-control-hover
+                        : tab.id == root.active-tab-id ? DesignTokens.color-surface-hover
+                        : transparent;
+                    accessible-role: button;
+                    accessible-label: tab.title;
+                    accessible-action-default => {
+                        root.select-tab(tab.id);
+                        tab-menu.close();
+                    }
+
+                    Icon {
+                        x: DesignTokens.space-2;
+                        y: (parent.height - self.height) / 2;
+                        name: IconName.check;
+                        size: DesignTokens.text-xs;
+                        color: DesignTokens.color-text;
+                        visible: tab.id == root.active-tab-id;
+                    }
+
+                    Text {
+                        x: DesignTokens.space-2 + DesignTokens.text-xs + DesignTokens.space-2;
+                        width: parent.width - self.x - DesignTokens.space-2;
+                        height: 100%;
+                        text: tab.title;
+                        color: tab.id == root.active-tab-id
+                            ? DesignTokens.color-text : DesignTokens.color-text-subtle;
+                        font-family: DesignTokens.font-ui;
+                        font-size: DesignTokens.text-xs;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+
+                    item-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.select-tab(tab.id);
+                            tab-menu.close();
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: DesignTokens.color-border;
+                }
+
+                Rectangle {
+                    height: root.menu-item-height;
+                    border-radius: DesignTokens.radius-sm;
+                    background: settings-touch.pressed
+                        ? DesignTokens.color-control-pressed
+                        : settings-touch.has-hover ? DesignTokens.color-control-hover
+                        : transparent;
+                    accessible-role: button;
+                    accessible-label: "设置";
+                    accessible-action-default => {
+                        root.open-settings();
+                        tab-menu.close();
+                    }
+
+                    Text {
+                        x: DesignTokens.space-2;
+                        width: parent.width - 2 * DesignTokens.space-2;
+                        height: 100%;
+                        text: "设置";
+                        color: DesignTokens.color-text;
+                        font-family: DesignTokens.font-ui;
+                        font-size: DesignTokens.text-xs;
+                        vertical-alignment: center;
+                    }
+
+                    settings-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.open-settings();
+                            tab-menu.close();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

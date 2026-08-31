@@ -4773,8 +4773,11 @@ dependencies = [
  "alacritty_terminal",
  "arboard",
  "bytemuck",
+ "fontdb",
  "glyphon",
  "raw-window-handle",
+ "serde",
+ "serde_json",
  "slint",
  "slint-build",
 ]

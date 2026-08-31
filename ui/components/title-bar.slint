@@ -1,6 +1,8 @@
 import { DesignTokens } from "../design-tokens.slint";
+import { IconName } from "../icons/icon.slint";
 import { TabData } from "../models.slint";
 import { IconButton } from "icon-button.slint";
+import { TabDropdown } from "tab-dropdown.slint";
 import { TerminalTab } from "terminal-tab.slint";
 import { TrafficLight } from "traffic-light.slint";
 
@@ -8,13 +10,78 @@ import { TrafficLight } from "traffic-light.slint";
 export component TitleBar inherits Rectangle {
     in property <[TabData]> tabs;
     in property <int> active-tab-id: -1;
+    in property <int> active-tab-index: -1;
     callback close-window;
     callback minimize-window;
     callback toggle-maximize;
     callback drag-window(float, float);
     callback new-tab;
+    callback open-settings;
     callback select-tab(int);
     callback close-tab(int);
+
+    private property <length> tab-actions-width:
+        2 * DesignTokens.add-button-width;
+    private property <length> resolved-tab-width: min(
+        DesignTokens.tab-max-width,
+        max(
+            DesignTokens.tab-min-width,
+            (tabs-viewport.width - root.tab-actions-width
+                - DesignTokens.space-1 * (root.tabs.length + 1))
+                / max(1, root.tabs.length),
+        ),
+    );
+    private property <length> tabs-content-width:
+        root.tabs.length * root.resolved-tab-width
+            + root.tab-actions-width
+            + DesignTokens.space-1 * (root.tabs.length + 1);
+    // macOS 在鼠标进入整组三色按钮时，同时显示三个内部符号。
+    private property <bool> traffic-lights-hovered:
+        close-light.hovered || minimize-light.hovered || zoom-light.hovered;
+
+    function reveal-tab(tab-x: length, tab-width: length) {
+        let visible-left = -tabs-scroll.viewport-x;
+        let visible-right = visible-left + tabs-scroll.width;
+        if (tab-x < visible-left) {
+            tabs-scroll.viewport-x = max(
+                tabs-scroll.width - tabs-scroll.viewport-width,
+                -tab-x,
+            );
+        } else if (tab-x + tab-width > visible-right) {
+            tabs-scroll.viewport-x = max(
+                tabs-scroll.width - tabs-scroll.viewport-width,
+                tabs-scroll.width - tab-x - tab-width,
+            );
+        }
+    }
+
+    function reveal-active-tab() {
+        if (root.active-tab-index >= 0 && root.active-tab-index < root.tabs.length) {
+            root.reveal-tab(
+                root.active-tab-index * (root.resolved-tab-width + DesignTokens.space-1),
+                root.resolved-tab-width,
+            );
+        }
+    }
+
+    function scroll-tabs(delta: length) {
+        tabs-scroll.viewport-x = min(
+            0px,
+            max(
+                tabs-scroll.width - tabs-scroll.viewport-width,
+                tabs-scroll.viewport-x + delta,
+            ),
+        );
+    }
+
+    function move-window(mouse-x: length, mouse-y: length, pressed-x: length, pressed-y: length) {
+        root.drag-window(
+            (mouse-x - pressed-x) / 1px,
+            (mouse-y - pressed-y) / 1px,
+        );
+    }
+
+    changed active-tab-index => { root.reveal-active-tab(); }
 
     height: DesignTokens.titlebar-height;
     background: DesignTokens.color-surface;
@@ -25,34 +92,34 @@ export component TitleBar inherits Rectangle {
         height: 100%;
         mouse-cursor: grab;
         moved => {
-            root.drag-window(
-                (self.mouse-x - self.pressed-x) / 1px,
-                (self.mouse-y - self.pressed-y) / 1px,
-            );
+            root.move-window(self.mouse-x, self.mouse-y, self.pressed-x, self.pressed-y);
         }
         double-clicked => { root.toggle-maximize(); }
     }
 
     HorizontalLayout {
-        x: DesignTokens.space-4;
+        x: DesignTokens.traffic-lights-left;
         y: (parent.height - self.height) / 2;
         width: 3 * DesignTokens.traffic-light-size + 2 * DesignTokens.space-2;
         height: DesignTokens.traffic-light-size;
         spacing: DesignTokens.space-2;
 
-        TrafficLight {
+        close-light := TrafficLight {
             button-color: DesignTokens.color-window-close;
-            symbol: "×";
+            symbol: IconName.window-close;
+            show-symbol: root.traffic-lights-hovered;
             activated => { root.close-window(); }
         }
-        TrafficLight {
+        minimize-light := TrafficLight {
             button-color: DesignTokens.color-window-minimize;
-            symbol: "−";
+            symbol: IconName.window-minimize;
+            show-symbol: root.traffic-lights-hovered;
             activated => { root.minimize-window(); }
         }
-        TrafficLight {
+        zoom-light := TrafficLight {
             button-color: DesignTokens.color-window-maximize;
-            symbol: "+";
+            symbol: IconName.window-zoom;
+            show-symbol: root.traffic-lights-hovered;
             activated => { root.toggle-maximize(); }
         }
     }
@@ -67,44 +134,144 @@ export component TitleBar inherits Rectangle {
         tabs-viewport := Rectangle {
             x: 0px;
             y: 0px;
-            width: parent.width - DesignTokens.tab-add-slot-width;
+            width: parent.width;
             height: 100%;
             clip: true;
             background: transparent;
+            changed width => { root.reveal-active-tab(); }
 
-            HorizontalLayout {
-                y: DesignTokens.space-1-5;
+            wheel-area := TouchArea {
                 width: 100%;
-                height: DesignTokens.tab-height;
-                spacing: DesignTokens.space-1;
-
-                // 标签宽度随数量平均收缩，但始终受最小/最大宽度约束。
-                for tab in root.tabs : TerminalTab {
-                    width: min(
-                        DesignTokens.tab-max-width,
-                        max(
-                            DesignTokens.tab-min-width,
-                            (tabs-viewport.width - DesignTokens.space-1 * max(0, root.tabs.length - 1))
-                                / max(1, root.tabs.length),
-                        ),
-                    );
-                    tab: tab;
-                    active: tab.id == root.active-tab-id;
-                    selected => { root.select-tab(tab.id); }
-                    closed => { root.close-tab(tab.id); }
+                height: 100%;
+                mouse-cursor: grab;
+                moved => {
+                    root.move-window(self.mouse-x, self.mouse-y, self.pressed-x, self.pressed-y);
                 }
+                double-clicked => { root.toggle-maximize(); }
+                scroll-event(event) => {
+                    if (tabs-scroll.viewport-width <= tabs-scroll.width) {
+                        return reject;
+                    }
+                    root.scroll-tabs(event.delta-x != 0px ? event.delta-x : event.delta-y);
+                    accept
+                }
+
+                tabs-scroll := Flickable {
+                    width: 100%;
+                    height: 100%;
+                    viewport-width: max(self.width, root.tabs-content-width);
+                    viewport-height: self.height;
+                    // 横向滚动由滚轮和两侧按钮处理，避免 Flickable 吞掉空白处的窗口拖动。
+                    interactive: false;
+
+                    Rectangle {
+                        x: 0px;
+                        width: tabs-scroll.viewport-width;
+                        height: tabs-scroll.viewport-height;
+                        background: transparent;
+
+                        HorizontalLayout {
+                            x: 0px;
+                            y: DesignTokens.space-1-5;
+                            width: root.tabs-content-width;
+                            height: DesignTokens.tab-height;
+                            spacing: DesignTokens.space-1;
+                            alignment: start;
+
+                            // 空间充足时平均分配；溢出后保持最小宽度并横向滚动。
+                            for tab in root.tabs : TerminalTab {
+                                min-width: root.resolved-tab-width;
+                                preferred-width: root.resolved-tab-width;
+                                max-width: root.resolved-tab-width;
+                                min-height: DesignTokens.tab-height;
+                                preferred-height: DesignTokens.tab-height;
+                                max-height: DesignTokens.tab-height;
+                                tab: tab;
+                                active: tab.id == root.active-tab-id;
+                                selected => {
+                                    root.reveal-tab(self.x, self.width);
+                                    root.select-tab(tab.id);
+                                }
+                                closed => { root.close-tab(tab.id); }
+                            }
+
+                            // 新建和菜单按钮属于标签内容流，始终紧跟最后一个标签页。
+                            IconButton {
+                                min-width: DesignTokens.add-button-width;
+                                preferred-width: DesignTokens.add-button-width;
+                                max-width: DesignTokens.add-button-width;
+                                min-height: DesignTokens.tab-height;
+                                preferred-height: DesignTokens.tab-height;
+                                max-height: DesignTokens.tab-height;
+                                icon: IconName.add;
+                                icon-color: DesignTokens.color-text-subtle;
+                                activated => { root.new-tab(); }
+                            }
+
+                            TabDropdown {
+                                tabs: root.tabs;
+                                active-tab-id: root.active-tab-id;
+                                select-tab(id) => { root.select-tab(id); }
+                                open-settings => { root.open-settings(); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 溢出提示与轻量滚动控制，不占用标题栏的垂直空间。
+            if tabs-scroll.viewport-x < -1px : Rectangle {
+                x: 0px;
+                y: DesignTokens.space-1-5;
+                width: DesignTokens.space-5;
+                height: DesignTokens.tab-height;
+                background: @linear-gradient(90deg, DesignTokens.color-surface 35%, transparent 100%);
+            }
+
+            if tabs-scroll.viewport-x < -1px : IconButton {
+                x: 0px;
+                y: DesignTokens.space-1-5;
+                width: DesignTokens.icon-button-size;
+                height: DesignTokens.tab-height;
+                icon: IconName.chevron-left;
+                icon-size: DesignTokens.text-base;
+                activated => { root.scroll-tabs(root.resolved-tab-width + DesignTokens.space-1); }
+            }
+
+            if tabs-scroll.viewport-x > tabs-scroll.width - tabs-scroll.viewport-width + 1px : Rectangle {
+                x: parent.width - DesignTokens.space-5;
+                y: DesignTokens.space-1-5;
+                width: DesignTokens.space-5;
+                height: DesignTokens.tab-height;
+                background: @linear-gradient(270deg, DesignTokens.color-surface 35%, transparent 100%);
+            }
+
+            if tabs-scroll.viewport-x > tabs-scroll.width - tabs-scroll.viewport-width + 1px : IconButton {
+                x: parent.width - DesignTokens.icon-button-size;
+                y: DesignTokens.space-1-5;
+                width: DesignTokens.icon-button-size;
+                height: DesignTokens.tab-height;
+                icon: IconName.chevron-right;
+                icon-size: DesignTokens.text-base;
+                activated => { root.scroll-tabs(-root.resolved-tab-width - DesignTokens.space-1); }
+            }
+
+            // 两像素高的位置指示条，仅在标签溢出时出现。
+            if tabs-scroll.viewport-width > tabs-scroll.width : Rectangle {
+                x: (-tabs-scroll.viewport-x / (tabs-scroll.viewport-width - tabs-scroll.width))
+                    * (parent.width - self.width);
+                y: parent.height - 3px;
+                width: max(
+                    DesignTokens.space-5,
+                    parent.width * parent.width / tabs-scroll.viewport-width,
+                );
+                height: 2px;
+                border-radius: DesignTokens.radius-full;
+                background: DesignTokens.color-text-muted;
+                opacity: 0.55;
             }
         }
 
-        IconButton {
-            x: parent.width - DesignTokens.add-button-width - DesignTokens.space-0-5;
-            y: DesignTokens.space-1-5;
-            width: DesignTokens.add-button-width;
-            height: DesignTokens.tab-height;
-            icon: "+";
-            icon-color: DesignTokens.color-text-subtle;
-            activated => { root.new-tab(); }
-        }
     }
 
     Rectangle {

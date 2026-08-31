@@ -3,4 +3,21 @@ export struct TabData {
     id: int,
     title: string,
     terminal-active: bool,
+    is-settings: bool,
+}
+
+// 设置页左侧展示的 Shell Profile 摘要；完整编辑字段由 Rust 单独同步。
+export struct ShellProfileData {
+    id: int,
+    name: string,
+    program: string,
+    is-default: bool,
+}
+
+// 固定应用动作对应的可编辑快捷键。
+export struct ShortcutData {
+    action: string,
+    label: string,
+    shortcut: string,
+    pass-through: bool,
 }
