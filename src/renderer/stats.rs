@@ -1,6 +1,9 @@
+//! 低开销的渲染性能计数器，每秒向标准错误输出一次聚合结果。
+
 use crate::terminal::FullRedrawReason;
 use std::time::{Duration, Instant};
 
+/// 分别统计“应用帧补丁”和“提交 GPU 渲染”两个阶段。
 #[derive(Default)]
 pub(super) struct PerfStats {
     interval_started: Option<Instant>,
@@ -21,6 +24,7 @@ pub(super) struct PerfStats {
 }
 
 impl PerfStats {
+    /// 累计一次补丁应用的工作量和 CPU 耗时。
     pub(super) fn record_apply(
         &mut self,
         full_redraw_reason: Option<FullRedrawReason>,
@@ -44,6 +48,7 @@ impl PerfStats {
         self.apply_samples_us.push(elapsed.as_micros() as u64);
     }
 
+    /// 累计一次实际绘制，并在统计窗口到期时打印结果。
     pub(super) fn record_render(
         &mut self,
         full_surface: bool,
@@ -111,6 +116,7 @@ fn average_us(duration: Duration, count: u64) -> u128 {
     duration.as_micros() / u128::from(count.max(1))
 }
 
+/// 使用 nearest-rank 方法计算微秒样本的百分位值。
 fn percentile(samples: &[u64], percentile: usize) -> u64 {
     if samples.is_empty() {
         return 0;

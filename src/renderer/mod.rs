@@ -1,39 +1,24 @@
-mod stats;
+//! GPU 终端渲染器：WGPU 绘制单元背景/装饰，glyphon 负责字形排版与缓存。
 
+mod grid;
+mod resources;
+mod stats;
+mod text;
+
+use self::resources::{
+    CellInstance, TEXTURE_FORMAT, clear_color, create_cell_pipeline, create_instance_buffer,
+    create_texture,
+};
 use self::stats::PerfStats;
-use crate::terminal::{FramePatch, RgbColor, TerminalCellPatch};
-use bytemuck::{Pod, Zeroable};
+use crate::terminal::FramePatch;
 use glyphon::{
-    Attrs, AttrsOwned, Buffer, Cache, Color as GlyphColor, ColorMode, Family, FontSystem, Metrics,
-    Resolution, Shaping, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer,
-    Viewport, Weight,
+    Cache, Color as GlyphColor, ColorMode, FontSystem, Resolution, SwashCache, TextArea, TextAtlas,
+    TextBounds, TextRenderer, Viewport,
 };
 use slint::wgpu_29::wgpu;
 use std::time::Instant;
 
-const TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
-const FONT_FAMILY: &str = "Cascadia Mono";
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct CellInstance {
-    rect: [f32; 4],
-    background: [f32; 4],
-    foreground: [f32; 4],
-    flags: [u32; 4],
-}
-
-impl Default for CellInstance {
-    fn default() -> Self {
-        Self::zeroed()
-    }
-}
-
-struct OwnedSpan {
-    text: String,
-    attrs: AttrsOwned,
-}
-
+/// 渲染器内部保存的光标快照。
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct CursorState {
     column: usize,
@@ -43,6 +28,7 @@ struct CursorState {
     blinking: bool,
 }
 
+/// 将终端帧补丁合成为一张可直接交给 Slint 显示的共享纹理。
 pub(crate) struct GpuTerminalRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -52,10 +38,12 @@ pub(crate) struct GpuTerminalRenderer {
     height: u32,
     columns: usize,
     rows: usize,
+    /// 当前网格世代；用于拒绝没有完整基准的跨尺寸增量帧。
     generation: Option<u64>,
     cell_width: f32,
     cell_height: f32,
     font_size: f32,
+    /// 每个网格单元一个实例，主要承载背景、下划线和删除线。
     cell_instances: Vec<CellInstance>,
     instance_buffer: wgpu::Buffer,
     cursor_buffer: wgpu::Buffer,
@@ -67,9 +55,11 @@ pub(crate) struct GpuTerminalRenderer {
     glyph_viewport: Viewport,
     glyph_atlas: TextAtlas,
     glyph_renderer: TextRenderer,
-    row_buffers: Vec<Buffer>,
+    /// 每个非空终端单元一个独立 Buffer，消除连续排版与网格坐标的累计误差。
+    text_cells: Vec<Option<text::CellTextBuffer>>,
     cursor: CursorState,
     cursor_phase: bool,
+    /// 下次渲染需要覆盖的行号，提交前会排序和去重。
     dirty_rows: Vec<usize>,
     clear_pending: bool,
     render_pending: bool,
@@ -77,6 +67,7 @@ pub(crate) struct GpuTerminalRenderer {
 }
 
 impl GpuTerminalRenderer {
+    /// 使用 Slint 提供的 WGPU 设备创建共享纹理、管线、字形图集和网格缓冲区。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         device: &wgpu::Device,
@@ -159,7 +150,7 @@ impl GpuTerminalRenderer {
             glyph_viewport,
             glyph_atlas,
             glyph_renderer,
-            row_buffers: Vec::new(),
+            text_cells: Vec::new(),
             cursor: CursorState::default(),
             cursor_phase: true,
             dirty_rows: (0..rows).collect(),
@@ -167,15 +158,17 @@ impl GpuTerminalRenderer {
             render_pending: true,
             stats: PerfStats::default(),
         };
-        renderer.rebuild_rows();
+        renderer.rebuild_text_cells();
         renderer.update_viewport();
         renderer
     }
 
+    /// 将 WGPU 纹理导入为 Slint Image；两者继续共享同一底层资源。
     pub(crate) fn image(&self) -> Result<slint::Image, slint::wgpu_29::TextureImportError> {
         slint::Image::try_from(self.texture.clone())
     }
 
+    /// 同步物理表面和字体度量；返回值表示纹理已重建，调用方需重新导入 Image。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn sync_surface(
         &mut self,
@@ -220,9 +213,11 @@ impl GpuTerminalRenderer {
         texture_changed
     }
 
+    /// 将完整帧或增量行应用到 CPU/GPU 缓存；基准不完整时返回 false。
     pub(crate) fn apply_frame(&mut self, frame: &FramePatch) -> bool {
         let generation_changed = self.generation != Some(frame.generation);
         let grid_changed = frame.columns != self.columns || frame.rows != self.rows;
+        // 新世代或新尺寸不能建立在旧纹理内容之上，必须先收到完整帧。
         if (generation_changed || grid_changed) && !frame.full_redraw {
             return false;
         }
@@ -293,6 +288,7 @@ impl GpuTerminalRenderer {
         true
     }
 
+    /// 仅在有脏行时录制并提交 GPU 命令。
     pub(crate) fn render_if_needed(&mut self) {
         if !self.render_pending {
             return;
@@ -318,22 +314,32 @@ impl GpuTerminalRenderer {
             },
         );
 
-        let text_areas = dirty_rows.iter().filter_map(|&row| {
-            self.row_buffers.get(row).map(|buffer| TextArea {
-                buffer,
-                left: 0.0,
-                top: row as f32 * self.cell_height,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: self.width as i32,
-                    bottom: self.height as i32,
-                },
-                default_color: GlyphColor::rgb(230, 237, 243),
-                custom_glyphs: &[],
-            })
-        });
+        // 只提交脏行中的非空单元；每个 TextArea 的 left 来自精确网格列坐标。
+        let mut text_areas = Vec::new();
+        for &row in &dirty_rows {
+            let start = row.saturating_mul(self.columns);
+            let end = start
+                .saturating_add(self.columns)
+                .min(self.text_cells.len());
+            for (column, cell) in self.text_cells[start..end].iter().enumerate() {
+                if let Some(cell) = cell {
+                    text_areas.push(TextArea {
+                        buffer: &cell.buffer,
+                        left: column as f32 * self.cell_width,
+                        top: row as f32 * self.cell_height,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: 0,
+                            top: 0,
+                            right: self.width as i32,
+                            bottom: self.height as i32,
+                        },
+                        default_color: GlyphColor::rgb(230, 237, 243),
+                        custom_glyphs: &[],
+                    });
+                }
+            }
+        }
         if let Err(error) = self.glyph_renderer.prepare(
             &self.device,
             &self.queue,
@@ -403,6 +409,7 @@ impl GpuTerminalRenderer {
             .record_render(full_surface, dirty_rows.len(), started.elapsed());
     }
 
+    /// 推进闪烁相位；返回 true 表示调用方需要请求一次窗口重绘。
     pub(crate) fn tick_cursor(&mut self) -> bool {
         if !self.cursor.visible || !self.cursor.blinking {
             return false;
@@ -412,242 +419,9 @@ impl GpuTerminalRenderer {
         self.render_pending = true;
         true
     }
-
-    fn rebuild_rows(&mut self) {
-        let metrics = Metrics::new(self.font_size, self.cell_height);
-        self.row_buffers = (0..self.rows)
-            .map(|_| {
-                let mut buffer = Buffer::new(&mut self.font_system, metrics);
-                buffer.set_size(
-                    &mut self.font_system,
-                    Some(self.width as f32),
-                    Some(self.cell_height),
-                );
-                buffer.set_monospace_width(&mut self.font_system, Some(self.cell_width));
-                buffer
-            })
-            .collect();
-    }
-
-    fn resize_grid(&mut self, columns: usize, rows: usize) {
-        self.columns = columns;
-        self.rows = rows;
-        self.cell_instances = vec![CellInstance::default(); columns.saturating_mul(rows)];
-        self.instance_buffer = create_instance_buffer(&self.device, columns.saturating_mul(rows));
-        self.rebuild_rows();
-        self.dirty_rows = (0..rows).collect();
-        self.clear_pending = true;
-        self.render_pending = true;
-    }
-
-    fn update_row_metrics(&mut self) {
-        let metrics = Metrics::new(self.font_size, self.cell_height);
-        for buffer in &mut self.row_buffers {
-            buffer.set_metrics_and_size(
-                &mut self.font_system,
-                metrics,
-                Some(self.width as f32),
-                Some(self.cell_height),
-            );
-            buffer.set_monospace_width(&mut self.font_system, Some(self.cell_width));
-        }
-    }
-
-    fn update_instance_metrics(&mut self, previous_cell_width: f32) {
-        if previous_cell_width <= 0.0 {
-            return;
-        }
-        for (index, instance) in self.cell_instances.iter_mut().enumerate() {
-            if instance.rect[2] <= 0.0 {
-                continue;
-            }
-            let columns = instance.rect[2] / previous_cell_width;
-            instance.rect = [
-                (index % self.columns) as f32 * self.cell_width,
-                (index / self.columns) as f32 * self.cell_height,
-                columns * self.cell_width,
-                self.cell_height,
-            ];
-        }
-    }
-
-    fn upload_all_instances(&self) {
-        self.queue.write_buffer(
-            &self.instance_buffer,
-            0,
-            bytemuck::cast_slice(&self.cell_instances),
-        );
-        self.update_cursor_buffer();
-    }
-
-    fn update_viewport(&self) {
-        self.queue.write_buffer(
-            &self.viewport_buffer,
-            0,
-            bytemuck::cast_slice(&[self.width as f32, self.height as f32, 0.0, 0.0]),
-        );
-    }
-
-    fn update_cell_row(&mut self, row: usize, cells: &[TerminalCellPatch]) {
-        let start = row * self.columns;
-        self.cell_instances[start..start + self.columns].fill(CellInstance::default());
-        for cell in cells {
-            if cell.column >= self.columns {
-                continue;
-            }
-            self.cell_instances[start + cell.column] = CellInstance {
-                rect: [
-                    cell.column as f32 * self.cell_width,
-                    row as f32 * self.cell_height,
-                    cell.width_in_columns as f32 * self.cell_width,
-                    self.cell_height,
-                ],
-                background: rgba(cell.background, 1.0),
-                foreground: rgba(cell.foreground, 1.0),
-                flags: [
-                    cell.underline_style.max(0) as u32,
-                    u32::from(cell.strikeout),
-                    0,
-                    0,
-                ],
-            };
-        }
-    }
-
-    fn update_text_row(&mut self, row: usize, cells: &[TerminalCellPatch]) -> usize {
-        let Some(buffer) = self.row_buffers.get_mut(row) else {
-            return 0;
-        };
-        let mut spans = Vec::<OwnedSpan>::with_capacity(cells.len() + 2);
-        let mut next_column = 0;
-        for cell in cells {
-            if cell.column > next_column {
-                push_span(
-                    &mut spans,
-                    " ".repeat(cell.column - next_column),
-                    default_attrs(RgbColor {
-                        red: 0xe6,
-                        green: 0xed,
-                        blue: 0xf3,
-                    }),
-                );
-            }
-            let text = if cell.hidden || cell.text.is_empty() {
-                " ".repeat(cell.width_in_columns)
-            } else {
-                cell.text.clone()
-            };
-            let mut attrs = Attrs::new()
-                .family(Family::Name(FONT_FAMILY))
-                .color(glyph_color(cell.foreground))
-                .weight(if cell.bold {
-                    Weight::BOLD
-                } else {
-                    Weight::NORMAL
-                })
-                .style(if cell.italic {
-                    Style::Italic
-                } else {
-                    Style::Normal
-                });
-            if cell.hidden {
-                attrs = attrs.color(GlyphColor::rgba(0, 0, 0, 0));
-            }
-            push_span(&mut spans, text, AttrsOwned::new(&attrs));
-            next_column = cell.column + cell.width_in_columns;
-        }
-        if next_column < self.columns {
-            push_span(
-                &mut spans,
-                " ".repeat(self.columns - next_column),
-                default_attrs(RgbColor {
-                    red: 0xe6,
-                    green: 0xed,
-                    blue: 0xf3,
-                }),
-            );
-        }
-
-        let default = Attrs::new().family(Family::Name(FONT_FAMILY));
-        buffer.set_rich_text(
-            &mut self.font_system,
-            spans
-                .iter()
-                .map(|span| (span.text.as_str(), span.attrs.as_attrs())),
-            &default,
-            Shaping::Advanced,
-            None,
-        );
-        buffer.shape_until_scroll(&mut self.font_system, false);
-        spans.len()
-    }
-
-    fn update_cursor_buffer(&self) {
-        let mut instance = CellInstance::default();
-        if self.cursor.visible && self.cursor.column < self.columns && self.cursor.row < self.rows {
-            let cursor_color = RgbColor {
-                red: 0xe6,
-                green: 0xed,
-                blue: 0xf3,
-            };
-            instance = CellInstance {
-                rect: [
-                    self.cursor.column as f32 * self.cell_width,
-                    self.cursor.row as f32 * self.cell_height,
-                    self.cell_width,
-                    self.cell_height,
-                ],
-                background: rgba(cursor_color, 0.60),
-                foreground: rgba(cursor_color, 1.0),
-                flags: [0, 0, (self.cursor.shape.max(0) + 1) as u32, 0],
-            };
-        }
-        self.queue
-            .write_buffer(&self.cursor_buffer, 0, bytemuck::bytes_of(&instance));
-    }
 }
 
-fn push_span(spans: &mut Vec<OwnedSpan>, text: String, attrs: AttrsOwned) {
-    if !text.is_empty() {
-        spans.push(OwnedSpan { text, attrs });
-    }
-}
-
-fn default_attrs(color: RgbColor) -> AttrsOwned {
-    AttrsOwned::new(
-        &Attrs::new()
-            .family(Family::Name(FONT_FAMILY))
-            .color(glyph_color(color)),
-    )
-}
-
-fn glyph_color(color: RgbColor) -> GlyphColor {
-    GlyphColor::rgb(color.red, color.green, color.blue)
-}
-
-fn rgba(color: RgbColor, alpha: f32) -> [f32; 4] {
-    [
-        f32::from(color.red) / 255.0,
-        f32::from(color.green) / 255.0,
-        f32::from(color.blue) / 255.0,
-        alpha,
-    ]
-}
-
-fn clear_color() -> wgpu::Color {
-    let color = RgbColor {
-        red: 0x0d,
-        green: 0x11,
-        blue: 0x17,
-    };
-    wgpu::Color {
-        r: f64::from(color.red) / 255.0,
-        g: f64::from(color.green) / 255.0,
-        b: f64::from(color.blue) / 255.0,
-        a: 1.0,
-    }
-}
-
+/// 判断完整帧是否按顺序覆盖了当前网格的每一行。
 fn frame_is_complete(frame: &FramePatch) -> bool {
     frame.changed_rows.len() == frame.rows
         && frame
@@ -657,106 +431,9 @@ fn frame_is_complete(frame: &FramePatch) -> bool {
             .all(|(row, patch)| patch.row == row)
 }
 
-fn create_texture(
-    device: &wgpu::Device,
-    width: u32,
-    height: u32,
-) -> (wgpu::Texture, wgpu::TextureView) {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("terminal surface"),
-        size: wgpu::Extent3d {
-            width: width.max(1),
-            height: height.max(1),
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: TEXTURE_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    (texture, view)
-}
-
-fn create_instance_buffer(device: &wgpu::Device, count: usize) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("terminal cell instances"),
-        size: (count.max(1) * std::mem::size_of::<CellInstance>()) as u64,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    })
-}
-
-fn create_cell_pipeline(
-    device: &wgpu::Device,
-    viewport_layout: &wgpu::BindGroupLayout,
-) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("terminal cell shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("cell.wgsl").into()),
-    });
-    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("terminal cell pipeline layout"),
-        bind_group_layouts: &[Some(viewport_layout)],
-        immediate_size: 0,
-    });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("terminal cell pipeline"),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: &[wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<CellInstance>() as u64,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x4,
-                        offset: 0,
-                        shader_location: 0,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x4,
-                        offset: 16,
-                        shader_location: 1,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x4,
-                        offset: 32,
-                        shader_location: 2,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Uint32x4,
-                        offset: 48,
-                        shader_location: 3,
-                    },
-                ],
-            }],
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: TEXTURE_FORMAT,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{frame_is_complete, rgba};
+    use super::{frame_is_complete, resources::rgba};
     use crate::terminal::{CursorPatch, FramePatch, RgbColor, RowPatch};
 
     fn full_frame(rows: usize) -> FramePatch {

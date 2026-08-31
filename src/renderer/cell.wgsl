@@ -1,3 +1,4 @@
+// 终端单元着色器：实例矩形以像素为单位，顶点阶段将其转换为裁剪空间。
 struct Viewport {
     size: vec2<f32>,
     _padding: vec2<f32>,
@@ -21,6 +22,7 @@ fn vs_main(
     @location(2) foreground: vec4<f32>,
     @location(3) flags: vec4<u32>,
 ) -> VertexOutput {
+    // 每个实例用两个三角形组成矩形，无需单独的顶点缓冲区。
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
         vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0)
@@ -42,6 +44,7 @@ fn vs_main(
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    // flags.z：0 表示普通单元，1..4 分别表示块状、下划线、竖线和空心块光标。
     let cursor = input.flags.z;
     if cursor != 0u {
         if cursor == 1u {
@@ -59,6 +62,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
+    // flags.x 编码下划线样式，flags.y 表示删除线。
     var color = input.background;
     let underline = input.flags.x;
     if underline == 1u && input.local.y > 0.91 {
