@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 //! 程序入口：选择 Slint 的窗口与渲染后端，然后把控制权交给应用层。
 
 mod app;
