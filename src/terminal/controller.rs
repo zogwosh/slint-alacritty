@@ -17,15 +17,19 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-/// Thread-safe facade used by the UI layer to control the terminal runtime.
+/// UI 层控制终端运行时的线程安全门面。
 pub(crate) struct TerminalController {
+    /// 所有输入和控制操作都通过该发送端交给工作线程。
     worker_sender: mpsc::Sender<WorkerMessage>,
+    /// 单槽帧邮箱：UI 来不及消费时，工作线程会合并兼容的增量帧。
     latest_frame: Arc<Mutex<Option<FramePatch>>>,
+    /// 防止同一批未消费帧重复唤醒 Slint 事件循环。
     notification_pending: Arc<AtomicBool>,
     worker_thread: Option<JoinHandle<()>>,
 }
 
 impl TerminalController {
+    /// 创建终端后端并启动专属工作线程。
     pub(crate) fn new(
         columns: usize,
         rows: usize,
@@ -97,6 +101,7 @@ impl TerminalController {
         let _ = self.worker_sender.send(WorkerMessage::ForceFullRedraw);
     }
 
+    /// 将 Slint 的整数按钮/动作编码转换为内部枚举后入队。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn mouse_input(
         &self,
@@ -162,6 +167,13 @@ impl TerminalController {
             .send(WorkerMessage::Resize(TerminalSize { columns, rows }));
     }
 
+    pub(crate) fn scroll_to(&self, display_offset: usize) {
+        let _ = self
+            .worker_sender
+            .send(WorkerMessage::ScrollTo(display_offset));
+    }
+
+    /// 取走最近一帧，并允许工作线程再次发送 UI 唤醒通知。
     pub(crate) fn take_latest_frame(&self) -> Option<FramePatch> {
         self.notification_pending.store(false, Ordering::Release);
         self.latest_frame
@@ -173,6 +185,7 @@ impl TerminalController {
 
 impl Drop for TerminalController {
     fn drop(&mut self) {
+        // 先通知循环退出再 join，确保 PTY 与子线程按顺序释放。
         let _ = self.worker_sender.send(WorkerMessage::Shutdown);
         if let Some(thread) = self.worker_thread.take() {
             let _ = thread.join();

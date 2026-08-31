@@ -1,3 +1,5 @@
+//! 终端工作线程：串行处理命令，并以约 60Hz 的上限发布增量帧。
+
 use super::{backend::TerminalBackend, command::WorkerMessage, frame::FramePatch};
 use arboard::Clipboard;
 use std::{
@@ -9,8 +11,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// 一帧最短间隔；连续 PTY 事件会在该窗口内合并。
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
+/// 工作线程主循环。没有待渲染内容时会阻塞等待消息，避免空转。
 pub(super) fn run_worker(
     mut backend: TerminalBackend,
     receiver: Receiver<WorkerMessage>,
@@ -24,6 +28,7 @@ pub(super) fn run_worker(
     backend.mark_dirty();
 
     loop {
+        // 有待渲染内容时只等到下一帧时间；空闲时则无限等待新命令。
         let message = if frame_pending {
             let wait = FRAME_INTERVAL.saturating_sub(last_frame.elapsed());
             match receiver.recv_timeout(wait) {
@@ -74,6 +79,7 @@ pub(super) fn run_worker(
             }
             Some(WorkerMessage::Mouse(input)) => backend.mouse_input(input),
             Some(WorkerMessage::MouseScroll(input)) => backend.mouse_scroll(input),
+            Some(WorkerMessage::ScrollTo(display_offset)) => backend.scroll_to(display_offset),
             Some(WorkerMessage::CopySelection) => {
                 if let Some(text) = backend.selected_text().filter(|text| !text.is_empty())
                     && let Some(clipboard) = &mut clipboard
@@ -104,6 +110,7 @@ pub(super) fn run_worker(
     }
 }
 
+/// 把新帧写入单槽邮箱；同一世代和尺寸的未消费增量帧按行合并。
 fn publish_frame(latest_frame: &Mutex<Option<FramePatch>>, mut incoming: FramePatch) {
     let mut slot = latest_frame.lock().expect("latest frame mutex poisoned");
     let Some(mut pending) = slot.take() else {
@@ -111,6 +118,7 @@ fn publish_frame(latest_frame: &Mutex<Option<FramePatch>>, mut incoming: FramePa
         return;
     };
 
+    // 尺寸或世代不一致时，旧补丁已经没有意义，直接以新帧替换。
     if pending.generation != incoming.generation
         || pending.columns != incoming.columns
         || pending.rows != incoming.rows
@@ -136,6 +144,8 @@ fn publish_frame(latest_frame: &Mutex<Option<FramePatch>>, mut incoming: FramePa
         pending.full_redraw_reason = incoming.full_redraw_reason;
     }
     pending.cursor = incoming.cursor;
+    pending.scroll_offset = incoming.scroll_offset;
+    pending.scroll_history_lines = incoming.scroll_history_lines;
     if incoming.title.is_some() {
         pending.title = incoming.title;
     }
@@ -166,6 +176,8 @@ mod tests {
                 })
                 .collect(),
             cursor: CursorPatch::default(),
+            scroll_offset: 0,
+            scroll_history_lines: 0,
             title: None,
             exit_message: None,
         }
@@ -231,5 +243,23 @@ mod tests {
             slot.lock().unwrap().as_ref().unwrap().full_redraw_reason,
             Some(FullRedrawReason::Resize)
         );
+    }
+
+    #[test]
+    fn mailbox_retains_latest_scrollbar_state() {
+        let slot = Mutex::new(None);
+        let mut first = frame(0, &[1]);
+        first.scroll_offset = 2;
+        first.scroll_history_lines = 40;
+        publish_frame(&slot, first);
+
+        let mut latest = frame(0, &[2]);
+        latest.scroll_offset = 17;
+        latest.scroll_history_lines = 64;
+        publish_frame(&slot, latest);
+
+        let frame = slot.lock().unwrap().take().unwrap();
+        assert_eq!(frame.scroll_offset, 17);
+        assert_eq!(frame.scroll_history_lines, 64);
     }
 }

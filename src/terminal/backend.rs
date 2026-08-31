@@ -1,3 +1,7 @@
+//! Alacritty 终端状态与真实 PTY 的适配层。
+//!
+//! 本模块持有终端网格、PTY 事件循环和本地选择状态，并把变化整理为帧补丁。
+
 use super::{
     command::{
         MouseAction, MouseButton, MouseInput, MouseScrollInput, TerminalSize, WorkerMessage,
@@ -5,9 +9,10 @@ use super::{
     frame::{FramePatch, capture_frame},
     input::{KeyInput, encode_key},
     mouse::{encode_mouse_button_code, encode_mouse_report, scroll_lines, visible_point},
+    notifier::Notifier,
 };
 use alacritty_terminal::{
-    event::{Event, EventListener, WindowSize},
+    event::{EventListener, WindowSize},
     event_loop::{EventLoop, EventLoopSender, Msg},
     grid::{Dimensions, Scroll},
     index::{Column, Point, Side},
@@ -19,167 +24,13 @@ use alacritty_terminal::{
 use std::{
     borrow::Cow,
     io,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-        mpsc::Sender,
-    },
+    sync::{Arc, mpsc::Sender},
     thread::JoinHandle,
 };
 
-#[derive(Clone)]
-pub(super) struct Notifier {
-    state: Arc<NotificationState>,
-}
-
-struct NotificationState {
-    dirty: AtomicBool,
-    title: Mutex<Option<String>>,
-    exit_message: Mutex<Option<String>>,
-    pty_sender: Mutex<Option<EventLoopSender>>,
-    worker_sender: Sender<WorkerMessage>,
-    window_size: Mutex<WindowSize>,
-}
-
-impl Notifier {
-    fn new(window_size: WindowSize, worker_sender: Sender<WorkerMessage>) -> Self {
-        Self {
-            state: Arc::new(NotificationState {
-                dirty: AtomicBool::new(false),
-                title: Mutex::new(None),
-                exit_message: Mutex::new(None),
-                pty_sender: Mutex::new(None),
-                worker_sender,
-                window_size: Mutex::new(window_size),
-            }),
-        }
-    }
-
-    fn set_pty_sender(&self, sender: EventLoopSender) {
-        *self
-            .state
-            .pty_sender
-            .lock()
-            .expect("terminal sender mutex poisoned") = Some(sender);
-    }
-
-    pub(super) fn send_to_pty(&self, text: String) {
-        let sender = self
-            .state
-            .pty_sender
-            .lock()
-            .expect("terminal sender mutex poisoned")
-            .clone();
-        if let Some(sender) = sender {
-            let _ = sender.send(Msg::Input(Cow::Owned(text.into_bytes())));
-        }
-    }
-
-    pub(super) fn begin_frame(&self) -> bool {
-        self.state.dirty.swap(false, Ordering::AcqRel)
-    }
-
-    pub(super) fn take_title(&self) -> Option<String> {
-        self.state
-            .title
-            .lock()
-            .expect("terminal title mutex poisoned")
-            .take()
-    }
-
-    pub(super) fn take_exit_message(&self) -> Option<String> {
-        self.state
-            .exit_message
-            .lock()
-            .expect("terminal exit mutex poisoned")
-            .take()
-    }
-
-    fn set_exit_message(&self, message: String, overwrite: bool) {
-        let mut exit_message = self
-            .state
-            .exit_message
-            .lock()
-            .expect("terminal exit mutex poisoned");
-        if overwrite || exit_message.is_none() {
-            *exit_message = Some(message);
-        }
-        drop(exit_message);
-        self.mark_dirty();
-    }
-
-    fn update_window_size(&self, size: WindowSize) {
-        *self
-            .state
-            .window_size
-            .lock()
-            .expect("terminal size mutex poisoned") = size;
-    }
-
-    pub(super) fn mark_dirty(&self) {
-        if !self.state.dirty.swap(true, Ordering::AcqRel) {
-            let _ = self.state.worker_sender.send(WorkerMessage::Render);
-        }
-    }
-}
-
-impl EventListener for Notifier {
-    fn send_event(&self, event: Event) {
-        match event {
-            Event::Title(title) => {
-                *self
-                    .state
-                    .title
-                    .lock()
-                    .expect("terminal title mutex poisoned") = Some(title);
-                self.mark_dirty();
-            }
-            Event::ResetTitle => {
-                *self
-                    .state
-                    .title
-                    .lock()
-                    .expect("terminal title mutex poisoned") = Some("Slint Terminal".into());
-                self.mark_dirty();
-            }
-            Event::PtyWrite(text) => self.send_to_pty(text),
-            Event::TextAreaSizeRequest(formatter) => {
-                let size = *self
-                    .state
-                    .window_size
-                    .lock()
-                    .expect("terminal size mutex poisoned");
-                self.send_to_pty(formatter(size));
-            }
-            Event::Wakeup | Event::MouseCursorDirty | Event::CursorBlinkingChange | Event::Bell => {
-                self.mark_dirty()
-            }
-            Event::Exit => self.set_exit_message("Process exited".into(), false),
-            Event::ChildExit(status) => {
-                let message = status.code().map_or_else(
-                    || "Process terminated".into(),
-                    |code| format!("Process exited with code {code}"),
-                );
-                self.set_exit_message(message, true);
-            }
-            Event::ClipboardStore(_, text) => {
-                let _ = self
-                    .state
-                    .worker_sender
-                    .send(WorkerMessage::ClipboardStore(text));
-            }
-            Event::ClipboardLoad(_, formatter) => {
-                let _ = self
-                    .state
-                    .worker_sender
-                    .send(WorkerMessage::ClipboardLoad(formatter));
-            }
-            Event::ColorRequest(_, _) => {}
-        }
-    }
-}
-
+/// 单个终端会话的后台实现。
 pub(super) struct TerminalBackend {
+    /// Alacritty 网格；PTY 事件线程会更新它，工作线程会读取它。
     terminal: Arc<FairMutex<Term<Notifier>>>,
     notifier: Notifier,
     pty_sender: EventLoopSender,
@@ -190,15 +41,19 @@ pub(super) struct TerminalBackend {
         )>,
     >,
     size: TerminalSize,
+    /// 每次字符网格尺寸改变时递增，使旧增量帧自动失效。
     generation: u64,
     cell_width: u16,
     cell_height: u16,
+    /// true 表示当前拖动属于本地文本选择，而不是发给终端应用。
     selecting: bool,
     pressed_button: Option<MouseButton>,
     forced_full_redraw: Option<super::frame::FullRedrawReason>,
+    /// 上一帧已绘制的选择区，用于额外标记取消高亮的旧行。
     rendered_selection: SelectionSnapshot,
 }
 
+/// 只保留判断选择区绘制变化所需的数据。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct SelectionSnapshot {
     range: Option<SelectionRange>,
@@ -206,6 +61,7 @@ struct SelectionSnapshot {
 }
 
 impl TerminalBackend {
+    /// 创建 Alacritty 网格、系统 PTY 和负责读取子进程输出的事件线程。
     pub(super) fn new(
         columns: usize,
         rows: usize,
@@ -254,6 +110,7 @@ impl TerminalBackend {
         })
     }
 
+    /// 在终端变脏时捕获最新帧，同时附带一次性的标题与退出信息。
     pub(super) fn take_frame(&mut self) -> Option<FramePatch> {
         if !self.notifier.begin_frame() {
             return None;
@@ -262,6 +119,7 @@ impl TerminalBackend {
         let forced_full_redraw = self.forced_full_redraw.take();
         let mut terminal = self.terminal.lock();
         let selection = selection_snapshot(&terminal);
+        // 选择区不是 Alacritty 单元本身的 damage，需要补上新旧范围涉及的行。
         let selection_dirty_rows = if selection == self.rendered_selection {
             Vec::new()
         } else {
@@ -299,6 +157,7 @@ impl TerminalBackend {
         self.notifier.send_to_pty(text);
     }
 
+    /// 编码抽象按键，并把生成的 ANSI 字节送进 PTY。
     pub(super) fn send_key(
         &self,
         input: KeyInput,
@@ -314,6 +173,7 @@ impl TerminalBackend {
         }
     }
 
+    /// 按终端的 bracketed-paste 模式安全地编码剪贴板文本。
     pub(super) fn paste(&self, text: &str) {
         let mode = *self.terminal.lock().mode();
         let bytes = encode_paste(
@@ -323,6 +183,7 @@ impl TerminalBackend {
         let _ = self.pty_sender.send(Msg::Input(Cow::Owned(bytes)));
     }
 
+    /// 同时调整 Alacritty 网格与真实 PTY，并开启新的帧世代。
     pub(super) fn resize(&mut self, size: TerminalSize) {
         if self.size == size {
             return;
@@ -338,12 +199,12 @@ impl TerminalBackend {
         self.notifier.mark_dirty();
     }
 
+    /// 在“终端应用鼠标协议”和“本地文本选择”之间路由鼠标事件。
     pub(super) fn mouse_input(&mut self, input: MouseInput) {
         let mut terminal = self.terminal.lock();
         let mode = *terminal.mode();
-        // Keep a drag owned by whichever side received its initial press. This avoids
-        // switching between local selection and application reporting mid-drag when
-        // Shift is pressed or released.
+        // 一次拖动始终归最初接收按下事件的一方所有，避免中途按下/释放 Shift 时，
+        // 在本地选择与应用鼠标报告之间跳变。
         let report_to_application = mode.intersects(alacritty_terminal::term::TermMode::MOUSE_MODE)
             && !self.selecting
             && (self.pressed_button.is_some() || !input.shift);
@@ -421,6 +282,7 @@ impl TerminalBackend {
         self.notifier.mark_dirty();
     }
 
+    /// 根据终端模式把滚轮解释为鼠标报告、方向键或本地历史滚动。
     pub(super) fn mouse_scroll(&mut self, input: MouseScrollInput) {
         let lines = scroll_lines(input.lines);
         if lines == 0 {
@@ -430,6 +292,7 @@ impl TerminalBackend {
         let mut terminal = self.terminal.lock();
         let mode = *terminal.mode();
         if mode.intersects(alacritty_terminal::term::TermMode::MOUSE_MODE) && !input.shift {
+            // 运行中的 TUI 请求了鼠标跟踪：把滚轮编码成按钮 64/65。
             drop(terminal);
             let button = if lines > 0 { 64 } else { 65 };
             let report = encode_mouse_button_code(
@@ -448,6 +311,7 @@ impl TerminalBackend {
         } else if mode.contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
             && mode.contains(alacritty_terminal::term::TermMode::ALTERNATE_SCROLL)
         {
+            // 备用屏幕常没有滚动历史，传统终端会把滚轮转换为上下方向键。
             let app_cursor = mode.contains(alacritty_terminal::term::TermMode::APP_CURSOR);
             drop(terminal);
             let sequence = match (lines > 0, app_cursor) {
@@ -466,10 +330,25 @@ impl TerminalBackend {
         }
     }
 
+    /// 将滚动条位置换算为 Alacritty 视口偏移，并限制在现有历史范围内。
+    pub(super) fn scroll_to(&mut self, display_offset: usize) {
+        let mut terminal = self.terminal.lock();
+        let history_lines = terminal
+            .total_lines()
+            .saturating_sub(terminal.screen_lines());
+        let target = display_offset.min(history_lines);
+        let current = terminal.grid().display_offset();
+        let delta = target as i64 - current as i64;
+        terminal.scroll_display(Scroll::Delta(
+            delta.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+        ));
+    }
+
     pub(super) fn selected_text(&self) -> Option<String> {
         self.terminal.lock().selection_to_string()
     }
 
+    /// 选中从历史缓冲区顶部到当前网格底部的全部文本。
     pub(super) fn select_all(&mut self) {
         let mut terminal = self.terminal.lock();
         let start = Point::new(terminal.topmost_line(), Column(0));
@@ -490,6 +369,7 @@ fn selection_snapshot<T: EventListener>(terminal: &Term<T>) -> SelectionSnapshot
     }
 }
 
+/// 把选择区裁剪到当前可见视口，返回需要重新绘制的行号。
 fn visible_selection_rows(snapshot: SelectionSnapshot, rows: usize) -> Vec<usize> {
     let Some(range) = snapshot.range else {
         return Vec::new();
@@ -507,6 +387,7 @@ fn visible_selection_rows(snapshot: SelectionSnapshot, rows: usize) -> Vec<usize
 
 impl Drop for TerminalBackend {
     fn drop(&mut self) {
+        // 关闭 PTY 事件循环并等待读取线程结束，避免会话资源泄漏。
         let _ = self.pty_sender.send(Msg::Shutdown);
         if let Some(thread) = self.event_thread.take() {
             let _ = thread.join();
@@ -514,6 +395,7 @@ impl Drop for TerminalBackend {
     }
 }
 
+/// 规范化换行；bracketed paste 会加边界序列并移除可注入结束标记的 ESC。
 fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     if bracketed {
@@ -524,6 +406,7 @@ fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
     }
 }
 
+/// 将字符网格尺寸和单元像素尺寸转换为 PTY ioctl 使用的 WindowSize。
 fn window_size(size: TerminalSize, cell_width: u16, cell_height: u16) -> WindowSize {
     WindowSize {
         num_lines: size.rows.min(u16::MAX as usize) as u16,

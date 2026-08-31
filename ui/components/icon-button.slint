@@ -1,5 +1,6 @@
 import { DesignTokens } from "../design-tokens.slint";
 
+// 通用图标按钮，通过 activated 回调把点击意图交给父组件。
 export component IconButton inherits Rectangle {
     in property <string> icon;
     in property <length> icon-size: DesignTokens.text-lg;

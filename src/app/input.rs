@@ -1,8 +1,12 @@
+//! Slint 按键事件到“应用动作”或“终端输入”的第一层分流。
+
 use crate::terminal::KeyInput;
 use slint::{SharedString, platform::Key};
 
+/// 应用层对一次按键的处理决定。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum KeyAction {
+    /// 继续交给终端协议编码器。
     Forward,
     Copy,
     SelectAll,
@@ -13,7 +17,9 @@ pub(super) enum KeyAction {
     Ignore,
 }
 
-/// Resolves application shortcuts before terminal key encoding.
+/// 在终端编码之前解析应用快捷键。
+///
+/// Ctrl+C/A/V 与 Alt+C 是明确的产品策略；其他 Ctrl/Alt 组合也会被应用拦截。
 pub(super) fn key_action(
     text: &str,
     control: bool,
@@ -47,7 +53,7 @@ pub(super) fn key_action(
     }
 }
 
-/// Converts Slint's key representation into the terminal-facing input model.
+/// 将 Slint 的按键表示转换成与 UI 框架无关的终端输入模型。
 pub(super) fn normalize_key(text: &str) -> Option<KeyInput> {
     let is = |key: Key| text == SharedString::from(key).as_str();
     let input = if is(Key::Shift)

@@ -7,20 +7,28 @@ export component TerminalView inherits Rectangle {
     in property <image> frame;
     in property <bool> terminal-active: true;
     in property <string> exit-message;
+    in property <int> scroll-offset;
+    in property <int> scroll-history-lines;
+    // 用十个等宽字符实测单元宽度，比复制一个固定像素值更能适应字体度量。
     out property <length> cell-width: font-probe.preferred-width / 10;
     out property <length> cell-height: DesignTokens.terminal-cell-height;
     out property <int> column-count: max(2, floor(self.width / self.cell-width));
     out property <int> row-count: max(1, floor(self.height / self.cell-height));
 
+    // 这些回调只描述 UI 事件；具体 ANSI 编码和终端模式判断在 Rust 中完成。
     callback key-input(string, bool, bool, bool, bool);
     callback viewport-resized(int, int);
     callback mouse-input(int, int, int, int, bool, bool, bool, bool);
     callback mouse-scroll(int, int, float, bool, bool, bool);
+    callback scroll-to(int);
+    // Slint 的后续字符事件不一定保留 AltGr 身份，因此单独跟踪按下状态。
     private property <bool> altgr-active;
     private property <bool> mouse-shift;
     private property <bool> mouse-alt;
     private property <bool> mouse-control;
+    private property <length> scroll-drag-offset;
 
+    // Slint 的响应式属性变化会主动通知 Rust 调整 PTY 字符网格。
     changed column-count => {
         root.viewport-resized(root.column-count, root.row-count);
     }
@@ -57,6 +65,7 @@ export component TerminalView inherits Rectangle {
             }
         }
 
+        // frame 是 Rust/WGPU 生成的整张终端纹理，Slint 只负责合成显示。
         Image {
             width: 100%;
             height: 100%;
@@ -64,6 +73,7 @@ export component TerminalView inherits Rectangle {
             image-fit: fill;
         }
 
+        // 不可见的字体探针仅用于计算 Cascadia Mono 的实际字符宽度。
         font-probe := Text {
             visible: false;
             text: "0000000000";
@@ -79,6 +89,7 @@ export component TerminalView inherits Rectangle {
         }
 
 
+        // 将连续像素坐标换算为离散字符格，并记录指针位于格子的左半或右半。
         mouse-area := TouchArea {
             width: 100%;
             height: 100%;
@@ -128,6 +139,79 @@ export component TerminalView inherits Rectangle {
                     event.modifiers.control,
                 );
                 accept
+            }
+        }
+
+        // 终端历史滚动条覆盖在视图右缘，不占用字符网格宽度。
+        if root.scroll-history-lines > 0 : scroll-track := Rectangle {
+            x: parent.width - self.width;
+            y: DesignTokens.space-1;
+            width: DesignTokens.space-2;
+            height: parent.height - 2 * DesignTokens.space-1;
+            border-radius: DesignTokens.radius-full;
+            background: scroll-touch.has-hover ? DesignTokens.color-scrollbar-track : transparent;
+
+            scroll-thumb := Rectangle {
+                x: DesignTokens.space-0-5;
+                width: parent.width - 2 * DesignTokens.space-0-5;
+                height: max(
+                    DesignTokens.space-5,
+                    parent.height * root.row-count
+                        / (root.row-count + root.scroll-history-lines),
+                );
+                y: (parent.height - self.height)
+                    * (root.scroll-history-lines - root.scroll-offset)
+                    / root.scroll-history-lines;
+                border-radius: DesignTokens.radius-full;
+                background: scroll-touch.pressed
+                    ? DesignTokens.color-text-subtle
+                    : scroll-touch.has-hover
+                        ? DesignTokens.color-text-muted
+                        : DesignTokens.color-idle;
+                opacity: scroll-touch.has-hover || scroll-touch.pressed ? 0.9 : 0.62;
+                animate background { duration: 150ms; }
+                animate opacity { duration: 150ms; }
+            }
+
+            scroll-touch := TouchArea {
+                width: 100%;
+                height: 100%;
+                mouse-cursor: pointer;
+
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down) {
+                        root.scroll-drag-offset = self.mouse-y >= scroll-thumb.y
+                            && self.mouse-y <= scroll-thumb.y + scroll-thumb.height
+                                ? self.mouse-y - scroll-thumb.y
+                                : scroll-thumb.height / 2;
+                    }
+                    if (event.kind == PointerEventKind.down
+                        || (event.kind == PointerEventKind.move && self.pressed)) {
+                        root.scroll-to(round(
+                            root.scroll-history-lines * (1 -
+                                max(
+                                    0px,
+                                    min(
+                                        parent.height - scroll-thumb.height,
+                                        self.mouse-y - root.scroll-drag-offset,
+                                    ),
+                                ) / max(1px, parent.height - scroll-thumb.height)
+                            )
+                        ));
+                    }
+                }
+
+                scroll-event(event) => {
+                    root.mouse-scroll(
+                        root.column-count - 1,
+                        min(root.row-count - 1, max(0, floor(self.mouse-y / root.cell-height))),
+                        event.delta-y / root.cell-height,
+                        event.modifiers.shift,
+                        event.modifiers.alt,
+                        event.modifiers.control,
+                    );
+                    accept
+                }
             }
         }
     }

@@ -1,3 +1,5 @@
+//! 鼠标坐标换算、滚轮归一化以及终端鼠标协议编码。
+
 use super::command::{MouseAction, MouseButton, TerminalSize};
 use alacritty_terminal::{
     event::EventListener,
@@ -5,6 +7,7 @@ use alacritty_terminal::{
     term::{Term, TermMode},
 };
 
+/// 把视口中的行列坐标换算为包含滚动历史偏移的终端网格坐标。
 pub(super) fn visible_point<T: EventListener>(
     terminal: &Term<T>,
     size: TerminalSize,
@@ -18,6 +21,7 @@ pub(super) fn visible_point<T: EventListener>(
     )
 }
 
+/// 将连续滚轮量转换为有限的整数行数，并保留不足一行的滚动方向。
 pub(super) fn scroll_lines(lines: f32) -> i32 {
     if !lines.is_finite() || lines == 0.0 {
         return 0;
@@ -31,6 +35,7 @@ pub(super) fn scroll_lines(lines: f32) -> i32 {
     }
 }
 
+/// 按当前终端模式生成 SGR、UTF-8 或传统 X10 鼠标报告。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_mouse_report(
     button: MouseButton,
@@ -61,6 +66,7 @@ pub(super) fn encode_mouse_report(
     encode_mouse_button_code(button_code, column, row, shift, alt, control, mode, release)
 }
 
+/// 为已经确定的按钮编号添加修饰键和坐标编码。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_mouse_button_code(
     button_code: u8,

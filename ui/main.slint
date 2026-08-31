@@ -5,6 +5,7 @@ import { TerminalView } from "terminal-view.slint";
 
 export { TabData }
 
+// 应用根窗口：负责组合标题栏和终端视图，并向 Rust 暴露统一接口。
 export component MainWindow inherits Window {
     title: root.terminal-title;
     preferred-width: 900px;
@@ -15,22 +16,28 @@ export component MainWindow inherits Window {
     no-frame: true;
     resize-border-width: DesignTokens.space-1-5;
 
+    // Rust 写入的活动会话状态和 GPU 共享纹理。
     in property <image> terminal-frame;
     in property <string> terminal-title: "Slint Terminal";
     in property <bool> terminal-active: true;
     in property <string> exit-message;
+    in property <int> scroll-offset;
+    in property <int> scroll-history-lines;
     in property <[TabData]> tabs;
     in property <int> active-tab-id: -1;
+    // 输入回调参数依次为文本、Ctrl、Alt、Shift、AltGr。
     callback key-input(string, bool, bool, bool, bool);
     callback viewport-resized(int, int);
     callback frame-ready;
     callback mouse-input(int, int, int, int, bool, bool, bool, bool);
     callback mouse-scroll(int, int, float, bool, bool, bool);
+    callback scroll-to(int);
     callback new-tab;
     callback select-tab(int);
     callback close-tab(int);
     callback drag-window(float, float);
 
+    // Rust 读取这些派生尺寸来配置 PTY 网格和渲染纹理。
     out property <length> cell-width: terminal-view.cell-width;
     out property <length> cell-height: terminal-view.cell-height;
     out property <int> viewport-columns: terminal-view.column-count;
@@ -65,6 +72,8 @@ export component MainWindow inherits Window {
             frame: root.terminal-frame;
             terminal-active: root.terminal-active;
             exit-message: root.exit-message;
+            scroll-offset: root.scroll-offset;
+            scroll-history-lines: root.scroll-history-lines;
             key-input(text, control, alt, shift, altgr) => {
                 root.key-input(text, control, alt, shift, altgr);
             }
@@ -77,6 +86,7 @@ export component MainWindow inherits Window {
             mouse-scroll(column, row, lines, shift, alt, control) => {
                 root.mouse-scroll(column, row, lines, shift, alt, control);
             }
+            scroll-to(offset) => { root.scroll-to(offset); }
         }
     }
 }

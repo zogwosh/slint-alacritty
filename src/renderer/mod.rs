@@ -773,6 +773,8 @@ mod tests {
                 })
                 .collect(),
             cursor: CursorPatch::default(),
+            scroll_offset: 0,
+            scroll_history_lines: 0,
             title: None,
             exit_message: None,
         }

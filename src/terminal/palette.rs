@@ -1,8 +1,11 @@
+//! 将 ANSI 命名色、索引色和应用动态覆盖统一解析为 RGB。
+
 use alacritty_terminal::{
     term::color::Colors,
     vte::ansi::{Color as AnsiColor, NamedColor, Rgb},
 };
 
+/// 渲染层使用的紧凑 8 位 RGB 颜色。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RgbColor {
     pub(crate) red: u8,
@@ -10,6 +13,7 @@ pub(crate) struct RgbColor {
     pub(crate) blue: u8,
 }
 
+/// 应用默认的 16 色 ANSI 调色板。
 const ANSI_PALETTE: [Rgb; 16] = [
     Rgb {
         r: 0x1f,
@@ -93,6 +97,7 @@ const ANSI_PALETTE: [Rgb; 16] = [
     },
 ];
 
+/// 优先采用终端应用设置的动态颜色，否则回退到内置调色板。
 pub(super) fn resolve_color(color: AnsiColor, overrides: &Colors, foreground: bool) -> RgbColor {
     let rgb = match color {
         AnsiColor::Spec(rgb) => rgb,
@@ -157,6 +162,7 @@ fn named_color(color: NamedColor, foreground: bool) -> Rgb {
     }
 }
 
+/// 生成 xterm 256 色中的 6×6×6 色立方与灰阶区间。
 fn indexed_color(index: u8) -> Rgb {
     if index < 16 {
         return ANSI_PALETTE[index as usize];

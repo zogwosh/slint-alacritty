@@ -1,5 +1,8 @@
+//! 将抽象按键与修饰键编码为 xterm/ANSI 字节序列。
+
 use alacritty_terminal::term::TermMode;
 
+/// 不依赖 Slint 的终端按键模型。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum KeyInput {
     Text(String),
@@ -21,6 +24,7 @@ pub(crate) enum KeyInput {
     Function(u8),
 }
 
+/// 根据当前终端模式编码按键；返回值可直接写入 PTY。
 pub(super) fn encode_key(
     input: KeyInput,
     control: bool,
@@ -29,6 +33,7 @@ pub(super) fn encode_key(
     altgr: bool,
     mode: TermMode,
 ) -> Vec<u8> {
+    // AltGr 在部分键盘布局中表现为 Ctrl+Alt，但它应产生普通可打印字符。
     let (control, alt) = if altgr {
         (false, false)
     } else {
@@ -64,6 +69,7 @@ pub(super) fn encode_key(
     bytes
 }
 
+/// 编码可打印文本，并处理 Ctrl 控制字节和 Alt 的 ESC 前缀。
 fn encode_text(text: &str, control: bool, alt: bool) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(text.len() + usize::from(alt));
     if alt {
@@ -84,6 +90,7 @@ fn encode_text(text: &str, control: bool, alt: bool) -> Vec<u8> {
     bytes
 }
 
+/// 将单个字符映射到传统 C0 控制码。
 fn control_byte(character: char) -> Option<u8> {
     let upper = character.to_ascii_uppercase();
     match upper {
@@ -99,11 +106,13 @@ fn control_byte(character: char) -> Option<u8> {
     }
 }
 
+/// 计算 xterm 修饰键参数：1 + Shift + 2×Alt + 4×Ctrl。
 fn modifier_parameter(control: bool, alt: bool, shift: bool) -> Option<u8> {
     let value = 1 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(control);
     (value != 1).then_some(value)
 }
 
+/// 光标键在应用光标模式下使用 SS3，否则使用 CSI。
 fn cursor_sequence(key: char, mode: TermMode, modifier: Option<u8>) -> String {
     if let Some(modifier) = modifier {
         return format!("\x1b[1;{modifier}{key}");

@@ -2,10 +2,12 @@ import { DesignTokens } from "../design-tokens.slint";
 import { TabData } from "../models.slint";
 import { IconButton } from "icon-button.slint";
 
+// 单个终端标签：显示会话状态、标题以及按需出现的关闭按钮。
 export component TerminalTab inherits Rectangle {
     in property <TabData> tab;
     in property <bool> active;
     private property <length> indicator-size: 7px;
+    // 为左侧状态点和右侧关闭按钮预留文本空间。
     private property <length> label-left: DesignTokens.space-2-5 + root.indicator-size + DesignTokens.space-2;
     private property <length> label-right: DesignTokens.icon-button-size + 2 * DesignTokens.space-2;
     callback selected;

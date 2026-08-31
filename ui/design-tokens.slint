@@ -1,7 +1,7 @@
-// Tailwind-style design tokens: a small primitive scale plus semantic aliases.
-// Components consume these names instead of embedding visual values.
+// 类 Tailwind 的设计令牌：由少量基础刻度和语义别名组成。
+// 组件只引用这些名字，不在各处重复嵌入视觉常量。
 export global DesignTokens {
-    // Primitive spacing scale (4 px base unit).
+    // 基础间距刻度（以 4 px 为基准单位）。
     out property <length> space-0-5: 2px;
     out property <length> space-1: 4px;
     out property <length> space-1-5: 6px;
@@ -11,13 +11,13 @@ export global DesignTokens {
     out property <length> space-4: 16px;
     out property <length> space-5: 20px;
 
-    // Radius scale.
+    // 圆角刻度。
     out property <length> radius-sm: 4px;
     out property <length> radius-md: 5px;
     out property <length> radius-lg: 7px;
     out property <length> radius-full: 999px;
 
-    // Typography scale.
+    // 字体与字号刻度。
     out property <string> font-ui: "Segoe UI";
     out property <string> font-mono: "Cascadia Mono";
     out property <length> text-2xs: 9px;
@@ -26,7 +26,7 @@ export global DesignTokens {
     out property <length> text-base: 16px;
     out property <length> text-lg: 20px;
 
-    // Semantic colors.
+    // 按用途命名的语义颜色。
     out property <color> color-canvas: #0d1117;
     out property <color> color-surface: #171c22;
     out property <color> color-surface-hover: #293039;
@@ -40,6 +40,7 @@ export global DesignTokens {
     out property <color> color-icon: #b8c0ca;
     out property <color> color-success: #4cc38a;
     out property <color> color-idle: #66717d;
+    out property <color> color-scrollbar-track: #20262dcc;
     out property <color> color-warning: #f0b84b;
     out property <color> color-danger-surface: #d9303742;
     out property <color> color-traffic-symbol: #2a2020a8;
@@ -47,7 +48,7 @@ export global DesignTokens {
     out property <color> color-window-minimize: #febc2e;
     out property <color> color-window-maximize: #28c840;
 
-    // Component sizing tokens.
+    // 组件尺寸令牌。
     out property <length> titlebar-height: 44px;
     out property <length> titlebar-tabs-left: 88px;
     out property <length> titlebar-tabs-right: 8px;

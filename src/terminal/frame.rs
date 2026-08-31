@@ -1,18 +1,23 @@
+//! 将 Alacritty 的终端网格提取为渲染器可消费的增量帧。
+
 use super::palette::{RgbColor, resolve_color};
 use alacritty_terminal::{
     event::EventListener,
+    grid::Dimensions,
     index::{Column, Line, Point},
     selection::SelectionRange,
     term::{Term, TermDamage, cell::Flags},
     vte::ansi::CursorShape,
 };
 
+/// 一个可见字符单元的完整绘制信息。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TerminalCellPatch {
     pub(crate) text: String,
     pub(crate) foreground: RgbColor,
     pub(crate) background: RgbColor,
     pub(crate) column: usize,
+    /// 普通字符为 1，宽字符为 2；占位单元不会单独生成补丁。
     pub(crate) width_in_columns: usize,
     pub(crate) bold: bool,
     pub(crate) italic: bool,
@@ -21,12 +26,14 @@ pub(crate) struct TerminalCellPatch {
     pub(crate) hidden: bool,
 }
 
+/// 某一行发生变化后的全部可见单元。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RowPatch {
     pub(crate) row: usize,
     pub(crate) cells: Vec<TerminalCellPatch>,
 }
 
+/// 光标位置与样式的轻量快照。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CursorPatch {
     pub(crate) column: usize,
@@ -36,19 +43,25 @@ pub(crate) struct CursorPatch {
     pub(crate) blinking: bool,
 }
 
+/// 后台提交给渲染器的一帧增量数据。
 #[derive(Debug)]
 pub(crate) struct FramePatch {
+    /// 尺寸变化时递增，用于阻止不同网格世代的补丁相互合并。
     pub(crate) generation: u64,
     pub(crate) columns: usize,
     pub(crate) rows: usize,
     pub(crate) full_redraw: bool,
     pub(crate) full_redraw_reason: Option<FullRedrawReason>,
+    /// 仅包含受损行；完整重绘时应覆盖所有行。
     pub(crate) changed_rows: Vec<RowPatch>,
     pub(crate) cursor: CursorPatch,
+    pub(crate) scroll_offset: usize,
+    pub(crate) scroll_history_lines: usize,
     pub(crate) title: Option<String>,
     pub(crate) exit_message: Option<String>,
 }
 
+/// 触发完整重绘的来源，主要用于正确性判断与性能统计。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FullRedrawReason {
     TerminalDamage,
@@ -56,6 +69,7 @@ pub(crate) enum FullRedrawReason {
     Resize,
 }
 
+/// 读取 Alacritty 的 damage 信息并捕获一帧；函数末尾会清除已消费的 damage。
 pub(super) fn capture_frame<T: EventListener>(
     terminal: &mut Term<T>,
     columns: usize,
@@ -64,6 +78,7 @@ pub(super) fn capture_frame<T: EventListener>(
     forced_full_redraw: Option<FullRedrawReason>,
     extra_dirty_rows: &[usize],
 ) -> FramePatch {
+    // 外部强制重绘优先于 Alacritty 自己报告的局部 damage。
     let (full_redraw_reason, mut damaged_rows) = if let Some(reason) = forced_full_redraw {
         (Some(reason), (0..rows).collect())
     } else {
@@ -84,9 +99,14 @@ pub(super) fn capture_frame<T: EventListener>(
     damaged_rows.dedup();
     let full_redraw = full_redraw_reason.is_some();
 
+    // renderable_content 会把滚动偏移、光标和选择区整理为当前视口快照。
     let cursor_blinking = terminal.cursor_style().blinking;
     let content = terminal.renderable_content();
     let display_offset = content.display_offset as i32;
+    let scroll_offset = content.display_offset;
+    let scroll_history_lines = terminal
+        .total_lines()
+        .saturating_sub(terminal.screen_lines());
     let cursor_row = content.cursor.point.line.0 + display_offset;
     let cursor = CursorPatch {
         column: content.cursor.point.column.0,
@@ -109,6 +129,7 @@ pub(super) fn capture_frame<T: EventListener>(
 
             for column in 0..columns {
                 let cell = &grid[grid_line][Column(column)];
+                // 宽字符的第二格只是占位符，由前一格的 width_in_columns 覆盖。
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     continue;
                 }
@@ -173,6 +194,8 @@ pub(super) fn capture_frame<T: EventListener>(
         full_redraw_reason,
         changed_rows,
         cursor,
+        scroll_offset,
+        scroll_history_lines,
         title: None,
         exit_message: None,
     }
@@ -194,6 +217,7 @@ fn cell_width_in_columns(flags: Flags) -> usize {
     }
 }
 
+/// 判断选择区是否覆盖该单元；宽字符任一半被选中都应高亮整个字形。
 fn selection_contains_cell(
     selection: Option<SelectionRange>,
     line: Line,
@@ -207,6 +231,7 @@ fn selection_contains_cell(
     })
 }
 
+/// 把 Alacritty 光标枚举转换为 GPU 着色器约定的整数编码。
 fn cursor_shape(shape: CursorShape) -> i32 {
     match shape {
         CursorShape::Block => 0,
@@ -217,6 +242,7 @@ fn cursor_shape(shape: CursorShape) -> i32 {
     }
 }
 
+/// 把互斥的下划线标志转换为 GPU 着色器使用的样式编号。
 fn underline_style(flags: Flags) -> i32 {
     if flags.contains(Flags::DOUBLE_UNDERLINE) {
         2
