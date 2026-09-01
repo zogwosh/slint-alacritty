@@ -12,7 +12,7 @@ use std::{
     rc::Rc,
 };
 
-/// 处理应用快捷键；未被应用消费的按键才会编码后发送给 PTY。
+/// 在窗口捕获阶段处理应用快捷键，并返回是否应阻止事件继续传播。
 pub(super) fn connect_input(
     ui: &MainWindow,
     tabs: Rc<RefCell<TabManager>>,
@@ -20,9 +20,12 @@ pub(super) fn connect_input(
     awaiting_full_frame: Rc<Cell<bool>>,
 ) {
     let weak_ui = ui.as_weak();
-    ui.on_key_input(move |text, control, alt, shift, altgr| {
+    let action_tabs = tabs.clone();
+    let action_settings = settings.clone();
+    let action_awaiting = awaiting_full_frame.clone();
+    ui.on_application_key_input(move |text, control, alt, shift, altgr| {
         let decision = configured_key_action(
-            &settings.borrow(),
+            &action_settings.borrow(),
             text.as_str(),
             control,
             alt,
@@ -32,33 +35,45 @@ pub(super) fn connect_input(
         match decision.action {
             Some(KeyAction::NewTab) => {
                 if let Some(ui) = weak_ui.upgrade() {
-                    let settings = settings.borrow();
-                    add_tab(&ui, &tabs, &awaiting_full_frame, settings.default_profile());
+                    let settings = action_settings.borrow();
+                    add_tab(
+                        &ui,
+                        &action_tabs,
+                        &action_awaiting,
+                        settings.default_profile(),
+                    );
                 }
             }
             Some(KeyAction::CloseTab) => {
-                let active_id = tabs.borrow().active_id();
+                let active_id = {
+                    let tabs = action_tabs.borrow();
+                    if tabs.settings_active {
+                        Some(-1)
+                    } else {
+                        tabs.active_id()
+                    }
+                };
                 if let (Some(ui), Some(id)) = (weak_ui.upgrade(), active_id) {
-                    close_tab(&ui, &tabs, &awaiting_full_frame, id);
+                    ui.invoke_close_tab(id);
                 }
             }
             Some(KeyAction::Copy) => {
-                if let Some(controller) = tabs.borrow().active_controller() {
+                if let Some(controller) = action_tabs.borrow().active_controller() {
                     controller.copy_selection();
                 }
             }
             Some(KeyAction::SelectAll) => {
-                if let Some(controller) = tabs.borrow().active_controller() {
+                if let Some(controller) = action_tabs.borrow().active_controller() {
                     controller.select_all();
                 }
             }
             Some(KeyAction::Paste) => {
-                if let Some(controller) = tabs.borrow().active_controller() {
+                if let Some(controller) = action_tabs.borrow().active_controller() {
                     controller.paste_clipboard();
                 }
             }
             Some(KeyAction::Interrupt) => {
-                if let Some(controller) = tabs.borrow().active_controller() {
+                if let Some(controller) = action_tabs.borrow().active_controller() {
                     controller.send_key(
                         crate::terminal::KeyInput::Text("c".into()),
                         true,
@@ -75,12 +90,20 @@ pub(super) fn connect_input(
             }
             None => {}
         }
-        if decision.forward
-            && let (Some(controller), Some(input)) = (
-                tabs.borrow().active_controller(),
-                normalize_key(text.as_str()),
-            )
-        {
+        let terminal_can_receive_input = action_tabs
+            .borrow()
+            .active_session()
+            .is_some_and(|session| session.terminal_active);
+        decision.action.is_some() && (!decision.forward || !terminal_can_receive_input)
+    });
+
+    // 未被窗口级应用快捷键消费的按键，只有活动终端仍在运行时才发送给 PTY。
+    ui.on_key_input(move |text, control, alt, shift, altgr| {
+        let controller = tabs
+            .borrow()
+            .active_session()
+            .and_then(|session| session.terminal_active.then(|| session.controller.clone()));
+        if let (Some(controller), Some(input)) = (controller, normalize_key(text.as_str())) {
             controller.send_key(input, control, alt, shift, altgr);
         }
     });
