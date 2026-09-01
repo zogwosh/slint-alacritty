@@ -206,6 +206,21 @@ pub(super) fn connect_tabs(
     });
 
     let weak_ui = ui.as_weak();
+    let profile_tabs = tabs.clone();
+    let profile_settings = settings.clone();
+    let profile_awaiting = awaiting_full_frame.clone();
+    ui.on_new_tab_with_profile(move |id| {
+        let Some(ui) = weak_ui.upgrade() else {
+            return;
+        };
+        let settings = profile_settings.borrow();
+        let Some(profile) = settings.profile(id) else {
+            return;
+        };
+        add_tab(&ui, &profile_tabs, &profile_awaiting, Some(profile));
+    });
+
+    let weak_ui = ui.as_weak();
     let settings_tabs = tabs.clone();
     ui.on_open_settings(move || {
         let Some(ui) = weak_ui.upgrade() else {

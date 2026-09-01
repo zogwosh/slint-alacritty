@@ -1,7 +1,8 @@
 import { DesignTokens } from "../design-tokens.slint";
 import { IconName } from "../icons/icon.slint";
-import { TabData } from "../models.slint";
+import { ShellProfileData, TabData } from "../models.slint";
 import { IconButton } from "icon-button.slint";
+import { ProfileDropdown } from "profile-dropdown.slint";
 import { TabDropdown } from "tab-dropdown.slint";
 import { TerminalTab } from "terminal-tab.slint";
 import { TrafficLight } from "traffic-light.slint";
@@ -9,6 +10,7 @@ import { TrafficLight } from "traffic-light.slint";
 // 自绘标题栏：承载窗口控制、拖动区域、标签页列表和新建按钮。
 export component TitleBar inherits Rectangle {
     in property <[TabData]> tabs;
+    in property <[ShellProfileData]> profiles;
     in property <int> active-tab-id: -1;
     in property <int> active-tab-index: -1;
     callback close-window;
@@ -16,6 +18,7 @@ export component TitleBar inherits Rectangle {
     callback toggle-maximize;
     callback drag-window(float, float);
     callback new-tab;
+    callback new-tab-with-profile(int);
     callback open-settings;
     callback select-tab(int);
     callback close-tab(int);
@@ -196,16 +199,10 @@ export component TitleBar inherits Rectangle {
                             }
 
                             // 新建和菜单按钮属于标签内容流，始终紧跟最后一个标签页。
-                            IconButton {
-                                min-width: DesignTokens.add-button-width;
-                                preferred-width: DesignTokens.add-button-width;
-                                max-width: DesignTokens.add-button-width;
-                                min-height: DesignTokens.tab-height;
-                                preferred-height: DesignTokens.tab-height;
-                                max-height: DesignTokens.tab-height;
-                                icon: IconName.add;
-                                icon-color: DesignTokens.color-text-subtle;
-                                activated => { root.new-tab(); }
+                            ProfileDropdown {
+                                profiles: root.profiles;
+                                new-default-tab => { root.new-tab(); }
+                                select-profile(id) => { root.new-tab-with-profile(id); }
                             }
 
                             TabDropdown {

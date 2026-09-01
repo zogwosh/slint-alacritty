@@ -1,0 +1,125 @@
+import { DesignTokens } from "../design-tokens.slint";
+import { Icon, IconName } from "../icons/icon.slint";
+import { ShellProfileData } from "../models.slint";
+import { IconButton } from "icon-button.slint";
+
+// 新建标签页按钮：左键使用默认 Profile，右键显示可选 Profile。
+export component ProfileDropdown inherits Rectangle {
+    in property <[ShellProfileData]> profiles;
+    callback new-default-tab;
+    callback select-profile(int);
+
+    private property <length> menu-header-height: 24px;
+    private property <length> menu-item-height: 30px;
+    private property <length> menu-content-height:
+        2 * DesignTokens.space-2
+            + root.menu-header-height
+            + max(1, root.profiles.length) * (root.menu-item-height + DesignTokens.space-1)
+            + DesignTokens.space-2;
+
+    min-width: DesignTokens.add-button-width;
+    preferred-width: DesignTokens.add-button-width;
+    max-width: DesignTokens.add-button-width;
+    min-height: DesignTokens.tab-height;
+    preferred-height: DesignTokens.tab-height;
+    max-height: DesignTokens.tab-height;
+
+    trigger := IconButton {
+        width: 100%;
+        height: 100%;
+        icon: IconName.add;
+        icon-color: DesignTokens.color-text-subtle;
+        accessible-role: button;
+        accessible-label: "新建默认 Profile 标签页；右键选择 Profile";
+        accessible-action-default => { root.new-default-tab(); }
+        activated => { root.new-default-tab(); }
+        context-menu-requested(_mouse-x, _mouse-y) => { profile-menu.show(); }
+    }
+
+    profile-menu := PopupWindow {
+        x: root.width - self.width;
+        y: root.height + DesignTokens.space-1;
+        width: 240px;
+        height: min(320px, root.menu-content-height);
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            border-width: 1px;
+            border-color: DesignTokens.color-border;
+            border-radius: DesignTokens.radius-lg;
+            background: DesignTokens.color-surface-active;
+            clip: true;
+
+            VerticalLayout {
+                padding: DesignTokens.space-2;
+                spacing: DesignTokens.space-1;
+
+                Text {
+                    height: root.menu-header-height;
+                    text: "新建标签页";
+                    color: DesignTokens.color-text-muted;
+                    font-family: DesignTokens.font-ui;
+                    font-size: DesignTokens.text-xs;
+                    vertical-alignment: center;
+                }
+
+                for profile in root.profiles : Rectangle {
+                    height: root.menu-item-height;
+                    border-radius: DesignTokens.radius-sm;
+                    background: item-touch.pressed
+                        ? DesignTokens.color-control-pressed
+                        : item-touch.has-hover ? DesignTokens.color-control-hover
+                        : profile.is-default ? DesignTokens.color-surface-hover
+                        : transparent;
+                    accessible-role: button;
+                    accessible-label: profile.name;
+                    accessible-action-default => {
+                        root.select-profile(profile.id);
+                        profile-menu.close();
+                    }
+
+                    Icon {
+                        x: DesignTokens.space-2;
+                        y: (parent.height - self.height) / 2;
+                        name: IconName.check;
+                        size: DesignTokens.text-xs;
+                        color: DesignTokens.color-text;
+                        visible: profile.is-default;
+                    }
+
+                    Text {
+                        x: DesignTokens.space-2 + DesignTokens.text-xs + DesignTokens.space-2;
+                        width: parent.width - self.x - DesignTokens.space-2;
+                        height: 100%;
+                        text: profile.name;
+                        color: profile.is-default
+                            ? DesignTokens.color-text : DesignTokens.color-text-subtle;
+                        font-family: DesignTokens.font-ui;
+                        font-size: DesignTokens.text-xs;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+
+                    item-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.select-profile(profile.id);
+                            profile-menu.close();
+                        }
+                    }
+                }
+
+                if root.profiles.length == 0 : Text {
+                    height: root.menu-item-height;
+                    text: "尚无 Profile";
+                    color: DesignTokens.color-text-muted;
+                    font-family: DesignTokens.font-ui;
+                    font-size: DesignTokens.text-xs;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}

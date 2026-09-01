@@ -57,6 +57,7 @@ export component MainWindow inherits Window {
     callback mouse-scroll(int, int, float, bool, bool, bool);
     callback scroll-to(int);
     callback new-tab;
+    callback new-tab-with-profile(int);
     callback open-settings;
     callback select-tab(int);
     callback close-tab(int);
@@ -111,6 +112,7 @@ export component MainWindow inherits Window {
             y: 0px;
             width: 100%;
             tabs: root.tabs;
+            profiles: root.shell-profiles;
             active-tab-id: root.active-tab-id;
             active-tab-index: root.active-tab-index;
             close-window => { root.close(); }
@@ -118,6 +120,7 @@ export component MainWindow inherits Window {
             toggle-maximize => { root.maximized = !root.maximized; }
             drag-window(delta-x, delta-y) => { root.drag-window(delta-x, delta-y); }
             new-tab => { root.new-tab(); }
+            new-tab-with-profile(id) => { root.new-tab-with-profile(id); }
             open-settings => { root.open-settings(); }
             select-tab(id) => { root.select-tab(id); }
             close-tab(id) => { root.close-tab(id); }

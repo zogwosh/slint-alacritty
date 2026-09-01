@@ -8,6 +8,7 @@ export component IconButton inherits Rectangle {
     in property <color> icon-color: DesignTokens.color-icon;
     out property <bool> hovered: touch.has-hover;
     callback activated;
+    callback context-menu-requested(length, length);
 
     border-radius: DesignTokens.radius-md;
     background: touch.pressed
@@ -24,6 +25,12 @@ export component IconButton inherits Rectangle {
 
     touch := TouchArea {
         mouse-cursor: pointer;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down
+                && event.button == PointerEventButton.right) {
+                root.context-menu-requested(self.mouse-x, self.mouse-y);
+            }
+        }
         clicked => { root.activated(); }
     }
 }
