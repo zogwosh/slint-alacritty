@@ -6,10 +6,11 @@ mod platform;
 mod rendering;
 mod sessions;
 pub(crate) mod settings;
+mod settings_reload;
 
 use crate::{MainWindow, renderer::GpuTerminalRenderer};
 use sessions::{TabManager, create_session, sync_tab_ui};
-use settings::{AppSettings, mono_font_families, sync_profile_draft, sync_settings_ui};
+use settings::{load_or_create, mono_font_families, sync_profile_draft, sync_settings_ui};
 use slint::{ComponentHandle, Timer, TimerMode};
 use std::{
     cell::{Cell, RefCell},
@@ -21,10 +22,17 @@ use std::{
 /// 创建窗口和初始会话，连接各职责模块后进入 Slint 事件循环。
 pub(crate) fn run() -> Result<(), Box<dyn Error>> {
     let ui = MainWindow::new()?;
-    let settings = Rc::new(RefCell::new(AppSettings::load()));
+    let initial_settings = load_or_create();
+    let settings_writable = Rc::new(Cell::new(initial_settings.writable));
+    let initial_error = initial_settings.error;
+    let settings = Rc::new(RefCell::new(initial_settings.settings));
     let mono_fonts = Rc::new(mono_font_families());
     sync_settings_ui(&ui, &settings.borrow(), &mono_fonts);
     sync_profile_draft(&ui, settings.borrow().default_profile());
+    if let Some(error) = initial_error {
+        ui.set_settings_message_error(true);
+        ui.set_settings_message(error.into());
+    }
     let initial_columns = ui.get_viewport_columns().max(2) as usize;
     let initial_rows = ui.get_viewport_rows().max(1) as usize;
     let first_session = create_session(
@@ -66,11 +74,26 @@ pub(crate) fn run() -> Result<(), Box<dyn Error>> {
         &ui,
         tabs.clone(),
         settings.clone(),
-        mono_fonts,
+        mono_fonts.clone(),
         awaiting_full_frame.clone(),
+        settings_writable.clone(),
     );
     bindings::connect_window_controls(&ui);
-    rendering::connect_frame_updates(&ui, tabs, renderer.clone(), awaiting_full_frame);
+    rendering::connect_frame_updates(
+        &ui,
+        tabs.clone(),
+        renderer.clone(),
+        awaiting_full_frame.clone(),
+    );
+
+    let _settings_timer = settings_reload::start(
+        &ui,
+        settings,
+        mono_fonts,
+        tabs,
+        awaiting_full_frame,
+        settings_writable,
+    );
 
     // 光标闪烁是渲染状态，不需要推动终端解析器生成新帧。
     let cursor_timer = Timer::default();

@@ -169,6 +169,7 @@ pub(super) fn connect_tabs(
     settings: Rc<RefCell<AppSettings>>,
     mono_fonts: Rc<Vec<String>>,
     awaiting_full_frame: Rc<Cell<bool>>,
+    settings_writable: Rc<Cell<bool>>,
 ) {
     let weak_ui = ui.as_weak();
     let new_tabs = tabs.clone();
@@ -286,11 +287,15 @@ pub(super) fn connect_tabs(
     let weak_ui = ui.as_weak();
     let save_settings = settings.clone();
     let save_fonts = mono_fonts.clone();
+    let save_writable = settings_writable.clone();
     ui.on_save_profile(
         move |id, name, program, arguments, working_directory, environment| {
             let Some(ui) = weak_ui.upgrade() else {
                 return;
             };
+            if !ensure_settings_writable(&ui, &save_writable) {
+                return;
+            }
             let mut settings = save_settings.borrow_mut();
             let mut profile = match build_profile(
                 id,
@@ -339,10 +344,14 @@ pub(super) fn connect_tabs(
     let weak_ui = ui.as_weak();
     let default_settings = settings.clone();
     let default_fonts = mono_fonts.clone();
+    let default_writable = settings_writable.clone();
     ui.on_set_default_profile(move |id| {
         let Some(ui) = weak_ui.upgrade() else {
             return;
         };
+        if !ensure_settings_writable(&ui, &default_writable) {
+            return;
+        }
         let mut settings = default_settings.borrow_mut();
         if settings.profile(id).is_none() {
             return;
@@ -364,10 +373,14 @@ pub(super) fn connect_tabs(
     let weak_ui = ui.as_weak();
     let remove_settings = settings.clone();
     let remove_fonts = mono_fonts.clone();
+    let remove_writable = settings_writable.clone();
     ui.on_remove_profile(move |id| {
         let Some(ui) = weak_ui.upgrade() else {
             return;
         };
+        if !ensure_settings_writable(&ui, &remove_writable) {
+            return;
+        }
         let mut settings = remove_settings.borrow_mut();
         settings.profiles.retain(|profile| profile.id != id);
         if settings.default_profile_id == Some(id) {
@@ -392,11 +405,15 @@ pub(super) fn connect_tabs(
 
     let font_settings = settings.clone();
     let font_fonts = mono_fonts.clone();
+    let font_writable = settings_writable.clone();
     let weak_ui = ui.as_weak();
     ui.on_save_font(move |index, size| {
         let Some(ui) = weak_ui.upgrade() else {
             return;
         };
+        if !ensure_settings_writable(&ui, &font_writable) {
+            return;
+        }
         let Some(family) = font_fonts.get(index.max(0) as usize) else {
             ui.set_settings_message_error(true);
             ui.set_settings_message("错误：请选择有效的等宽字体".into());
@@ -435,10 +452,14 @@ pub(super) fn connect_tabs(
     });
 
     let weak_ui = ui.as_weak();
+    let shortcut_writable = settings_writable;
     ui.on_save_shortcut(move |action, shortcut, pass_through| {
         let Some(ui) = weak_ui.upgrade() else {
             return;
         };
+        if !ensure_settings_writable(&ui, &shortcut_writable) {
+            return;
+        }
         let mut settings = settings.borrow_mut();
         if let Err(message) = update_shortcut(
             &mut settings,
@@ -462,6 +483,17 @@ pub(super) fn connect_tabs(
             }
         }
     });
+}
+
+fn ensure_settings_writable(ui: &MainWindow, writable: &Cell<bool>) -> bool {
+    if writable.get() {
+        return true;
+    }
+    ui.set_settings_message_error(true);
+    ui.set_settings_message(
+        "错误：settings.toml 当前无效，请先修改配置文件；应用不会覆盖该文件。".into(),
+    );
+    false
 }
 
 /// 自绘标题栏通过位移量拖动原生窗口。

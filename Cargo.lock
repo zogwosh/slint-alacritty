@@ -4777,9 +4777,9 @@ dependencies = [
  "glyphon",
  "raw-window-handle",
  "serde",
- "serde_json",
  "slint",
  "slint-build",
+ "toml",
 ]
 
 [[package]]
