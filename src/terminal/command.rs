@@ -4,11 +4,24 @@ use super::input::KeyInput;
 use alacritty_terminal::grid::Dimensions;
 use std::sync::Arc;
 
-/// 以字符单元为单位的终端网格尺寸。
+/// 终端网格尺寸及每个字符单元的像素尺寸。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct TerminalSize {
     pub(super) columns: usize,
     pub(super) rows: usize,
+    pub(super) cell_width: u16,
+    pub(super) cell_height: u16,
+}
+
+impl TerminalSize {
+    pub(super) fn new(columns: usize, rows: usize, cell_width: f32, cell_height: f32) -> Self {
+        Self {
+            columns,
+            rows,
+            cell_width: cell_width.ceil().clamp(1.0, u16::MAX as f32) as u16,
+            cell_height: cell_height.ceil().clamp(1.0, u16::MAX as f32) as u16,
+        }
+    }
 }
 
 impl Dimensions for TerminalSize {
@@ -56,6 +69,22 @@ pub(super) struct MouseInput {
     pub(super) control: bool,
     /// 指针是否落在单元格右半边，用于确定选择区端点方向。
     pub(super) right_half: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TerminalSize;
+
+    #[test]
+    fn terminal_size_tracks_and_clamps_cell_pixels() {
+        let size = TerminalSize::new(80, 24, 8.2, 17.1);
+        assert_eq!(size.cell_width, 9);
+        assert_eq!(size.cell_height, 18);
+
+        let minimum = TerminalSize::new(80, 24, 0.0, -1.0);
+        assert_eq!(minimum.cell_width, 1);
+        assert_eq!(minimum.cell_height, 1);
+    }
 }
 
 /// 已换算为字符行数的滚轮输入。

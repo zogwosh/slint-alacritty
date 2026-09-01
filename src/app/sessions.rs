@@ -69,7 +69,7 @@ pub(super) fn create_session(
             let weak_ui = weak_ui.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak_ui.upgrade() {
-                    ui.invoke_frame_ready();
+                    ui.invoke_frame_ready(id);
                 }
             });
         },
@@ -157,7 +157,7 @@ pub(super) fn add_tab(
     drop(manager);
     awaiting_full_frame.set(true);
     controller.request_full_redraw();
-    ui.invoke_frame_ready();
+    ui.invoke_frame_ready(id);
 }
 
 /// 关闭指定会话；最后一个标签关闭时隐藏窗口以结束应用。
@@ -167,7 +167,7 @@ pub(super) fn close_tab(
     awaiting_full_frame: &Rc<Cell<bool>>,
     id: i32,
 ) {
-    let (removed, next_controller, is_empty) = {
+    let (removed, next_session, is_empty) = {
         let mut manager = tabs.borrow_mut();
         let Some(index) = manager.sessions.iter().position(|session| session.id == id) else {
             return;
@@ -185,7 +185,13 @@ pub(super) fn close_tab(
                 manager.settings_active = true;
             }
             sync_tab_ui(ui, &manager);
-            (removed, manager.active_controller(), false)
+            (
+                removed,
+                manager
+                    .active_session()
+                    .map(|session| (session.id, session.controller.clone())),
+                false,
+            )
         }
     };
     drop(removed);
@@ -194,10 +200,10 @@ pub(super) fn close_tab(
         return;
     }
     awaiting_full_frame.set(true);
-    if let Some(controller) = next_controller {
+    if let Some((id, controller)) = next_session {
         controller.request_full_redraw();
+        ui.invoke_frame_ready(id);
     }
-    ui.invoke_frame_ready();
 }
 
 /// 将终端标题、退出状态和滚动信息写回对应标签页。
@@ -208,6 +214,11 @@ pub(super) fn apply_frame_metadata(
     frame: &FramePatch,
 ) {
     let mut manager = tabs.borrow_mut();
+    let is_active = !manager.settings_active
+        && manager
+            .sessions
+            .get(manager.active)
+            .is_some_and(|active| active.id == session_id);
     let Some(session) = manager
         .sessions
         .iter_mut()
@@ -218,8 +229,10 @@ pub(super) fn apply_frame_metadata(
     let mut changed = false;
     session.scroll_offset = frame.scroll_offset.min(i32::MAX as usize) as i32;
     session.scroll_history_lines = frame.scroll_history_lines.min(i32::MAX as usize) as i32;
-    ui.set_scroll_offset(session.scroll_offset);
-    ui.set_scroll_history_lines(session.scroll_history_lines);
+    if is_active {
+        ui.set_scroll_offset(session.scroll_offset);
+        ui.set_scroll_history_lines(session.scroll_history_lines);
+    }
     if let Some(title) = &frame.title {
         session.title = title.as_str().into();
         changed = true;

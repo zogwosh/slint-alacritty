@@ -44,8 +44,6 @@ pub(super) struct TerminalBackend {
     size: TerminalSize,
     /// 每次字符网格尺寸改变时递增，使旧增量帧自动失效。
     generation: u64,
-    cell_width: u16,
-    cell_height: u16,
     /// true 表示当前拖动属于本地文本选择，而不是发给终端应用。
     selecting: bool,
     pressed_button: Option<MouseButton>,
@@ -71,10 +69,8 @@ impl TerminalBackend {
         worker_sender: Sender<WorkerMessage>,
         profile: Option<&ShellProfile>,
     ) -> io::Result<Self> {
-        let size = TerminalSize { columns, rows };
-        let cell_width = cell_width.ceil() as u16;
-        let cell_height = cell_height.ceil() as u16;
-        let window_size = window_size(size, cell_width, cell_height);
+        let size = TerminalSize::new(columns, rows, cell_width, cell_height);
+        let window_size = window_size(size);
         let notifier = Notifier::new(window_size, worker_sender);
         let terminal = Arc::new(FairMutex::new(Term::new(
             Config::default(),
@@ -111,8 +107,6 @@ impl TerminalBackend {
             event_thread: Some(event_thread),
             size,
             generation: 0,
-            cell_width,
-            cell_height,
             selecting: false,
             pressed_button: None,
             forced_full_redraw: None,
@@ -199,13 +193,18 @@ impl TerminalBackend {
             return;
         }
 
-        self.terminal.lock().resize(size);
-        let new_window_size = window_size(size, self.cell_width, self.cell_height);
+        let grid_changed = self.size.columns != size.columns || self.size.rows != size.rows;
+        if grid_changed {
+            self.terminal.lock().resize(size);
+        }
+        let new_window_size = window_size(size);
         self.notifier.update_window_size(new_window_size);
         let _ = self.pty_sender.send(Msg::Resize(new_window_size));
         self.size = size;
-        self.generation = self.generation.wrapping_add(1);
-        self.forced_full_redraw = Some(super::frame::FullRedrawReason::Resize);
+        if grid_changed {
+            self.generation = self.generation.wrapping_add(1);
+            self.forced_full_redraw = Some(super::frame::FullRedrawReason::Resize);
+        }
         self.notifier.mark_dirty();
     }
 
@@ -417,12 +416,12 @@ fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
 }
 
 /// 将字符网格尺寸和单元像素尺寸转换为 PTY ioctl 使用的 WindowSize。
-fn window_size(size: TerminalSize, cell_width: u16, cell_height: u16) -> WindowSize {
+fn window_size(size: TerminalSize) -> WindowSize {
     WindowSize {
         num_lines: size.rows.min(u16::MAX as usize) as u16,
         num_cols: size.columns.min(u16::MAX as usize) as u16,
-        cell_width,
-        cell_height,
+        cell_width: size.cell_width,
+        cell_height: size.cell_height,
     }
 }
 

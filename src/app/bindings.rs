@@ -154,7 +154,7 @@ pub(super) fn connect_resize(ui: &MainWindow, tabs: Rc<RefCell<TabManager>>) {
         }
 
         if let Some(controller) = tabs.borrow().active_controller() {
-            controller.resize(columns as usize, rows as usize);
+            controller.resize(columns as usize, rows as usize, cell_width, cell_height);
             if resize_suspended.replace(false) {
                 controller.request_full_redraw();
             }
@@ -223,10 +223,12 @@ pub(super) fn connect_tabs(
             controller.resize(
                 ui.get_viewport_columns().max(2) as usize,
                 ui.get_viewport_rows().max(1) as usize,
+                ui.get_cell_width(),
+                ui.get_cell_height(),
             );
             controller.request_full_redraw();
         }
-        ui.invoke_frame_ready();
+        ui.invoke_frame_ready(id);
     });
 
     let weak_ui = ui.as_weak();
@@ -246,13 +248,15 @@ pub(super) fn connect_tabs(
                 return;
             }
             sync_tab_ui(&ui, &manager);
-            let controller = manager.active_controller();
+            let active_session = manager
+                .active_session()
+                .map(|session| (session.id, session.controller.clone()));
             drop(manager);
             close_awaiting.set(true);
-            if let Some(controller) = controller {
+            if let Some((active_id, controller)) = active_session {
                 controller.request_full_redraw();
+                ui.invoke_frame_ready(active_id);
             }
-            ui.invoke_frame_ready();
         } else {
             close_tab(&ui, &close_tabs, &close_awaiting, id);
         }
@@ -407,15 +411,21 @@ pub(super) fn connect_tabs(
                 sync_settings_ui(&ui, &settings, &font_fonts);
                 ui.set_settings_message("字体设置已应用。".into());
                 awaiting_full_frame.set(true);
-                if let Some(controller) = tabs.borrow().active_controller() {
+                if let Some((active_id, controller)) = tabs
+                    .borrow()
+                    .active_session()
+                    .map(|session| (session.id, session.controller.clone()))
+                {
                     controller.resize(
                         ui.get_viewport_columns().max(2) as usize,
                         ui.get_viewport_rows().max(1) as usize,
+                        ui.get_cell_width(),
+                        ui.get_cell_height(),
                     );
                     controller.request_full_redraw();
+                    ui.invoke_frame_ready(active_id);
                 }
                 ui.window().request_redraw();
-                ui.invoke_frame_ready();
             }
             Err(error) => {
                 ui.set_settings_message_error(true);

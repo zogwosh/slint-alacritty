@@ -105,13 +105,22 @@ pub(super) fn connect_frame_updates(
     awaiting_full_frame: Rc<Cell<bool>>,
 ) {
     let weak_ui = ui.as_weak();
-    ui.on_frame_ready(move || {
-        let (active_id, controller) = {
+    ui.on_frame_ready(move |session_id| {
+        let (controller, is_active) = {
             let manager = tabs.borrow();
-            let Some(session) = manager.active_session() else {
+            let Some(session) = manager
+                .sessions
+                .iter()
+                .find(|session| session.id == session_id)
+            else {
                 return;
             };
-            (session.id, session.controller.clone())
+            (
+                session.controller.clone(),
+                manager
+                    .active_session()
+                    .is_some_and(|active| active.id == session_id),
+            )
         };
         let Some(frame) = controller.take_latest_frame() else {
             return;
@@ -120,7 +129,10 @@ pub(super) fn connect_frame_updates(
             return;
         };
 
-        apply_frame_metadata(&ui, &tabs, active_id, &frame);
+        apply_frame_metadata(&ui, &tabs, session_id, &frame);
+        if !is_active {
+            return;
+        }
         let mut renderer_ref = renderer.borrow_mut();
         let Some(gpu) = renderer_ref.as_mut() else {
             awaiting_full_frame.set(true);

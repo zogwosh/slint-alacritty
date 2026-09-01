@@ -164,10 +164,15 @@ impl TerminalController {
             }));
     }
 
-    pub(crate) fn resize(&self, columns: usize, rows: usize) {
+    pub(crate) fn resize(&self, columns: usize, rows: usize, cell_width: f32, cell_height: f32) {
         let _ = self
             .worker_sender
-            .send(WorkerMessage::Resize(TerminalSize { columns, rows }));
+            .send(WorkerMessage::Resize(TerminalSize::new(
+                columns,
+                rows,
+                cell_width,
+                cell_height,
+            )));
     }
 
     pub(crate) fn scroll_to(&self, display_offset: usize) {
