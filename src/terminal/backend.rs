@@ -233,21 +233,37 @@ impl TerminalBackend {
         shift: bool,
         altgr: bool,
     ) {
-        let mode = *self.terminal.lock().mode();
+        let mut terminal = self.terminal.lock();
+        let mode = *terminal.mode();
         let bytes = encode_key(input, control, alt, shift, altgr, mode);
-        if !bytes.is_empty() {
-            let _ = self.pty_sender.send(Msg::Input(Cow::Owned(bytes)));
+        if bytes.is_empty() {
+            return;
         }
+        Self::leave_scrollback_for_input(&mut terminal);
+        drop(terminal);
+        let _ = self.pty_sender.send(Msg::Input(Cow::Owned(bytes)));
     }
 
     /// 按终端的 bracketed-paste 模式安全地编码剪贴板文本。
     pub(super) fn paste(&self, text: &str) {
-        let mode = *self.terminal.lock().mode();
+        let mut terminal = self.terminal.lock();
+        let mode = *terminal.mode();
         let bytes = encode_paste(
             text,
             mode.contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE),
         );
+        Self::leave_scrollback_for_input(&mut terminal);
+        drop(terminal);
         let _ = self.pty_sender.send(Msg::Input(Cow::Owned(bytes)));
+    }
+
+    /// 用户输入时回到底部。Alacritty 网格在新输出到达时会刻意保持视口偏移，
+    /// 若不主动复位，向上翻过历史后再键入，输入行会一直停留在视口之外。
+    /// `scroll_display` 自身会发出 MouseCursorDirty 并标记全屏受损，这里无需再手动标脏。
+    fn leave_scrollback_for_input(terminal: &mut Term<Notifier>) {
+        if terminal.grid().display_offset() != 0 {
+            terminal.scroll_display(Scroll::Bottom);
+        }
     }
 
     /// 同时调整 Alacritty 网格与真实 PTY，并开启新的帧世代。
