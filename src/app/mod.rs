@@ -9,7 +9,7 @@ pub(crate) mod settings;
 mod settings_reload;
 
 use crate::{MainWindow, renderer::GpuTerminalRenderer};
-use sessions::{TabManager, create_session, sync_tab_ui};
+use sessions::{TabManager, create_session, sync_tab_ui, viewport_grid};
 use settings::{load_or_create, mono_font_families, sync_profile_draft, sync_settings_ui};
 use slint::{ComponentHandle, Timer, TimerMode};
 use std::{
@@ -33,8 +33,7 @@ pub(crate) fn run() -> Result<(), Box<dyn Error>> {
         ui.set_settings_message_error(true);
         ui.set_settings_message(error.into());
     }
-    let initial_columns = ui.get_viewport_columns().max(2) as usize;
-    let initial_rows = ui.get_viewport_rows().max(1) as usize;
+    let (initial_columns, initial_rows) = viewport_grid(&ui);
     let first_session = create_session(
         &ui,
         1,
@@ -60,6 +59,7 @@ pub(crate) fn run() -> Result<(), Box<dyn Error>> {
         &ui,
         renderer.clone(),
         tabs.clone(),
+        settings.clone(),
         awaiting_full_frame.clone(),
     )?;
     bindings::connect_input(
@@ -102,11 +102,18 @@ pub(crate) fn run() -> Result<(), Box<dyn Error>> {
     let timer_renderer = renderer;
     let weak_ui = ui.as_weak();
     cursor_timer.start(TimerMode::Repeated, Duration::from_millis(500), move || {
+        let Some(ui) = weak_ui.upgrade() else {
+            return;
+        };
+        // 终端被设置页覆盖或窗口最小化时，闪烁不可见，不值得驱动 GPU 与窗口重绘。
+        if ui.get_settings_active() || ui.window().is_minimized() {
+            return;
+        }
         let redraw = timer_renderer
             .borrow_mut()
             .as_mut()
             .is_some_and(GpuTerminalRenderer::tick_cursor);
-        if redraw && let Some(ui) = weak_ui.upgrade() {
+        if redraw {
             ui.window().request_redraw();
         }
     });

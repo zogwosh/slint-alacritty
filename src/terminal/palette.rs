@@ -37,15 +37,23 @@ pub(super) fn resolve_dynamic_color(
     })
 }
 
+/// 装饰层（选区、搜索高亮）使用的带透明度颜色；在字形下方按 alpha 混合到单元背景上。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RgbaColor {
+    pub(crate) red: u8,
+    pub(crate) green: u8,
+    pub(crate) blue: u8,
+    pub(crate) alpha: u8,
+}
+
 /// 从 UI DesignTokens 注入的终端基础主题；终端程序仍可通过 ANSI 动态覆盖单元颜色。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TerminalTheme {
     pub(crate) background: RgbColor,
     pub(crate) foreground: RgbColor,
-    pub(crate) selection_background: RgbColor,
-    pub(crate) selection_foreground: RgbColor,
-    pub(crate) search_match_background: RgbColor,
-    pub(crate) search_current_background: RgbColor,
+    pub(crate) selection_background: RgbaColor,
+    pub(crate) search_match_background: RgbaColor,
+    pub(crate) search_current_background: RgbaColor,
 }
 
 /// 应用默认的 16 色 ANSI 调色板。
@@ -218,57 +226,20 @@ fn dim(color: Rgb) -> Rgb {
 
 #[cfg(test)]
 mod tests {
-    use super::{RgbColor, TerminalTheme, resolve_color, resolve_dynamic_color};
+    use super::{RgbColor, RgbaColor, TerminalTheme, resolve_color, resolve_dynamic_color};
     use alacritty_terminal::{
         term::color::Colors,
         vte::ansi::{Color, NamedColor},
     };
 
-    #[test]
-    fn bright_dim_colors_do_not_overflow() {
-        let color = resolve_color(
-            Color::Named(NamedColor::DimRed),
-            &Colors::default(),
-            true,
-            TerminalTheme {
-                background: RgbColor {
-                    red: 1,
-                    green: 2,
-                    blue: 3,
-                },
-                foreground: RgbColor {
-                    red: 4,
-                    green: 5,
-                    blue: 6,
-                },
-                selection_background: RgbColor {
-                    red: 7,
-                    green: 8,
-                    blue: 9,
-                },
-                selection_foreground: RgbColor {
-                    red: 10,
-                    green: 11,
-                    blue: 12,
-                },
-                search_match_background: RgbColor {
-                    red: 13,
-                    green: 14,
-                    blue: 15,
-                },
-                search_current_background: RgbColor {
-                    red: 19,
-                    green: 20,
-                    blue: 21,
-                },
-            },
-        );
-        assert_eq!((color.red, color.green, color.blue), (170, 82, 76));
-    }
-
-    #[test]
-    fn dynamic_queries_use_overrides_then_theme_defaults() {
-        let theme = TerminalTheme {
+    fn test_theme() -> TerminalTheme {
+        let rgba = |red, green, blue| RgbaColor {
+            red,
+            green,
+            blue,
+            alpha: 255,
+        };
+        TerminalTheme {
             background: RgbColor {
                 red: 1,
                 green: 2,
@@ -279,27 +250,26 @@ mod tests {
                 green: 5,
                 blue: 6,
             },
-            selection_background: RgbColor {
-                red: 7,
-                green: 8,
-                blue: 9,
-            },
-            selection_foreground: RgbColor {
-                red: 10,
-                green: 11,
-                blue: 12,
-            },
-            search_match_background: RgbColor {
-                red: 13,
-                green: 14,
-                blue: 15,
-            },
-            search_current_background: RgbColor {
-                red: 19,
-                green: 20,
-                blue: 21,
-            },
-        };
+            selection_background: rgba(7, 8, 9),
+            search_match_background: rgba(13, 14, 15),
+            search_current_background: rgba(19, 20, 21),
+        }
+    }
+
+    #[test]
+    fn bright_dim_colors_do_not_overflow() {
+        let color = resolve_color(
+            Color::Named(NamedColor::DimRed),
+            &Colors::default(),
+            true,
+            test_theme(),
+        );
+        assert_eq!((color.red, color.green, color.blue), (170, 82, 76));
+    }
+
+    #[test]
+    fn dynamic_queries_use_overrides_then_theme_defaults() {
+        let theme = test_theme();
         let mut colors = Colors::default();
         colors[NamedColor::Foreground] = Some(alacritty_terminal::vte::ansi::Rgb {
             r: 20,

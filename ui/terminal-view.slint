@@ -21,11 +21,12 @@ export component TerminalView inherits Rectangle {
     in property <int> search-result-total;
     in property <int> search-focus-request;
     out property <bool> search-input-focused: search-panel.input-focused;
-    // 由 glyphon 使用实际渲染字体测量，PTY 网格与 GPU 排版共享同一套度量。
+    // 由 Rust 以物理整数像素测量后换算成逻辑值传入，PTY 网格与 GPU 排版共享同一套度量。
     in property <length> cell-width: 9px;
-    in property <length> cell-height: root.font-size + 5px;
-    out property <int> column-count: max(2, floor(self.width / self.cell-width));
-    out property <int> row-count: max(1, floor(self.height / self.cell-height));
+    in property <length> cell-height: DesignTokens.terminal-cell-height;
+    // 两个整数物理像素相除后再换算逻辑值会引入浮点误差，加一个小量避免恰好整除时少算一列。
+    out property <int> column-count: max(2, floor(self.width / self.cell-width + 0.001));
+    out property <int> row-count: max(1, floor(self.height / self.cell-height + 0.001));
 
     // 这些回调只描述 UI 事件；具体 ANSI 编码和终端模式判断在 Rust 中完成。
     callback key-input(string, bool, bool, bool, bool);
@@ -116,11 +117,13 @@ export component TerminalView inherits Rectangle {
         }
 
         // frame 是 Rust/WGPU 生成的整张终端纹理，Slint 只负责合成显示。
+        // 纹理与元素在物理像素上一一对应，必须用最近邻采样，任何插值都会让字形发虚。
         Image {
             width: 100%;
             height: 100%;
             source: root.frame;
             image-fit: fill;
+            image-rendering: pixelated;
         }
 
         // Slint 1.17 只把 IME composition 交给 TextInput。输入代理位于终端光标处，
@@ -212,6 +215,7 @@ export component TerminalView inherits Rectangle {
         }
 
         // 终端历史与其他页面复用同一个滚动条，不占用字符网格宽度。
+        // 拇指位置始终由终端的真实滚动状态驱动；拖动只发出目标值，由 Rust 回写 scroll-offset。
         if root.scroll-history-lines > 0 : AppScrollBar {
             x: parent.width - self.width;
             y: DesignTokens.space-1;
@@ -220,8 +224,8 @@ export component TerminalView inherits Rectangle {
             page-size: root.row-count * 1px;
             value: -(root.scroll-history-lines - root.scroll-offset) * 1px;
             wheel-changes-value: false;
-            scrolled => {
-                root.scroll-to(round(root.scroll-history-lines + self.value / 1px));
+            value-requested(value) => {
+                root.scroll-to(round(root.scroll-history-lines + value / 1px));
             }
             wheel(delta-y, mouse-y, shift, alt, control) => {
                 root.mouse-scroll(

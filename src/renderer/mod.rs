@@ -1,12 +1,16 @@
 //! GPU 终端渲染器：WGPU 绘制单元背景/装饰，glyphon 负责字形排版与缓存。
 
+mod decoration;
+mod fonts;
 mod grid;
 mod resources;
 mod stats;
 mod text;
 
+pub(crate) use fonts::monospace_families;
 pub(crate) use text::measure_cell;
 
+use self::decoration::DecorationLayer;
 use self::resources::{
     CellInstance, TEXTURE_FORMAT, clear_color, create_cell_pipeline, create_instance_buffer,
     create_texture,
@@ -61,6 +65,8 @@ pub(crate) struct GpuTerminalRenderer {
     /// 每个网格单元一个实例，主要承载背景、下划线和删除线。
     cell_instances: Vec<CellInstance>,
     instance_buffer: wgpu::Buffer,
+    /// 选区与搜索高亮；独立于单元格与字形缓存，变化时只重绘相关行。
+    decorations: DecorationLayer,
     cursor_buffer: wgpu::Buffer,
     ime_instance_buffer: wgpu::Buffer,
     viewport_buffer: wgpu::Buffer,
@@ -135,10 +141,11 @@ impl GpuTerminalRenderer {
         });
         let cell_pipeline = create_cell_pipeline(&device, &viewport_layout);
         let instance_buffer = create_instance_buffer(&device, columns.saturating_mul(rows));
+        let decorations = DecorationLayer::new(&device);
         let cursor_buffer = create_instance_buffer(&device, 1);
         let ime_instance_buffer = create_instance_buffer(&device, 1);
 
-        let mut font_system = FontSystem::new();
+        let mut font_system = fonts::font_system();
         let fixed_baseline =
             text::measure_fixed_baseline(&mut font_system, font_family, font_size, cell_height);
 
@@ -170,6 +177,7 @@ impl GpuTerminalRenderer {
             fixed_baseline,
             cell_instances: vec![CellInstance::default(); columns.saturating_mul(rows)],
             instance_buffer,
+            decorations,
             cursor_buffer,
             ime_instance_buffer,
             viewport_buffer,
@@ -188,7 +196,7 @@ impl GpuTerminalRenderer {
             dirty_rows: (0..rows).collect(),
             clear_pending: true,
             render_pending: true,
-            stats: PerfStats::default(),
+            stats: PerfStats::from_environment(),
             theme,
         };
         renderer.rebuild_text_rows();
@@ -220,8 +228,6 @@ impl GpuTerminalRenderer {
             || font_size != self.font_size;
         let font_changed = self.font_family != font_family;
 
-        let previous_cell_width = self.cell_width;
-
         self.width = width;
         self.height = height;
         self.cell_width = cell_width;
@@ -243,8 +249,14 @@ impl GpuTerminalRenderer {
             );
         }
         if metrics_changed {
-            self.update_instance_metrics(previous_cell_width);
+            self.update_instance_metrics();
             self.upload_all_instances();
+            self.decorations.update_metrics(
+                &self.device,
+                &self.queue,
+                self.cell_width,
+                self.cell_height,
+            );
             self.clear_pending = true;
         }
         if texture_changed || metrics_changed {
@@ -289,7 +301,10 @@ impl GpuTerminalRenderer {
             .sum::<usize>();
         let mut uploaded_bytes = 0;
         let mut text_spans = 0;
+        let mut reshaped_rows = 0;
         let mut text_dirty_rows = vec![false; self.rows];
+        // 任何一行的缓存被判定不可信，本帧都视为失败，由调用方请求完整帧重建全部状态。
+        let mut cache_corrupted = false;
 
         for row in &frame.changed_rows {
             let start_column = row.start_column.min(self.columns);
@@ -298,25 +313,54 @@ impl GpuTerminalRenderer {
                 continue;
             }
             self.update_cell_range(row.row, start_column, end_column, &row.cells);
-            self.merge_row_cells(row.row, start_column, end_column, &row.cells);
-            text_dirty_rows[row.row] = true;
-            let start = row.row * self.columns + start_column;
-            let end = row.row * self.columns + end_column;
-            let bytes = bytemuck::cast_slice(&self.cell_instances[start..end]);
-            self.queue.write_buffer(
-                &self.instance_buffer,
-                (start * std::mem::size_of::<CellInstance>()) as u64,
-                bytes,
-            );
-            uploaded_bytes += bytes.len();
+            // 只有文字、字体属性或前景色变化才需要重新 shaping；背景/下划线只更新实例。
+            match self.merge_row_cells(row.row, start_column, end_column, &row.cells) {
+                Ok(true) => text_dirty_rows[row.row] = true,
+                Ok(false) => {}
+                Err(_) => {
+                    eprintln!(
+                        "terminal row cache rejected patch for row {} ({}..{}); requesting a full frame",
+                        row.row, start_column, end_column
+                    );
+                    cache_corrupted = true;
+                    text_dirty_rows[row.row] = true;
+                }
+            }
+            // 完整帧覆盖全部实例，随后一次性上传，避免逐行提交几十次小写入。
+            if !frame.full_redraw {
+                let start = row.row * self.columns + start_column;
+                let end = row.row * self.columns + end_column;
+                let bytes = bytemuck::cast_slice(&self.cell_instances[start..end]);
+                self.queue.write_buffer(
+                    &self.instance_buffer,
+                    (start * std::mem::size_of::<CellInstance>()) as u64,
+                    bytes,
+                );
+                uploaded_bytes += bytes.len();
+            }
             self.dirty_rows.push(row.row);
+        }
+        if frame.full_redraw {
+            let bytes = bytemuck::cast_slice(&self.cell_instances);
+            self.queue.write_buffer(&self.instance_buffer, 0, bytes);
+            uploaded_bytes += bytes.len();
         }
         for (row, dirty) in text_dirty_rows.into_iter().enumerate() {
             if dirty {
-                let cells = self.row_cells[row].clone();
-                text_spans += self.update_text_row(row, &cells);
+                text_spans += self.update_text_row(row);
+                reshaped_rows += 1;
             }
         }
+
+        let decoration_rows = self.decorations.replace(
+            &self.device,
+            &self.queue,
+            &frame.decorations,
+            self.cell_width,
+            self.cell_height,
+            self.theme,
+        );
+        self.dirty_rows.extend(decoration_rows);
 
         let previous_cursor = self.cursor;
         let next_cursor = CursorState {
@@ -343,10 +387,17 @@ impl GpuTerminalRenderer {
             frame.full_redraw_reason,
             dirty_rows,
             changed_cells,
+            reshaped_rows,
             text_spans,
             uploaded_bytes,
             started.elapsed(),
         );
+        if cache_corrupted {
+            // 被清空的行已按空行重新 shaping 并标脏，画面不会残留错误字形；
+            // 返回 false 让调用方立刻索取完整帧。
+            self.generation = None;
+            return false;
+        }
         true
     }
 
@@ -435,7 +486,9 @@ impl GpuTerminalRenderer {
                 });
             }
         }
-        if let Err(error) = self.glyph_renderer.prepare(
+        // 字形准备失败（如图集耗尽）时仍然提交背景与光标，并把这些行留到下一帧重试；
+        // 绝不能让渲染器停在“永远待渲染”的状态。
+        let glyphs_ready = match self.glyph_renderer.prepare(
             &self.device,
             &self.queue,
             &mut self.font_system,
@@ -444,10 +497,14 @@ impl GpuTerminalRenderer {
             text_areas,
             &mut self.swash_cache,
         ) {
-            eprintln!("terminal glyph preparation failed: {error}");
-            self.dirty_rows = dirty_rows;
-            return;
-        }
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("terminal glyph preparation failed: {error}");
+                false
+            }
+        };
+        // 光标只能随其所在行一起重绘；用 Load 叠加半透明光标会逐帧累积 alpha。
+        let cursor_row_dirty = dirty_rows.binary_search(&self.cursor.row).is_ok();
 
         let mut encoder = self
             .device
@@ -483,19 +540,33 @@ impl GpuTerminalRenderer {
                 let end = first.saturating_add(self.columns as u32);
                 pass.draw(0..6, first..end);
             }
+            // 装饰在单元背景之上、字形之下按 alpha 混合，因此不会改变字形颜色或排版。
+            if !self.decorations.is_empty() {
+                pass.set_vertex_buffer(0, self.decorations.buffer().slice(..));
+                for &row in &dirty_rows {
+                    let instances = self.decorations.instance_range(row);
+                    if !instances.is_empty() {
+                        pass.draw(0..6, instances);
+                    }
+                }
+            }
             if let Some(ime) = &self.ime_preedit
                 && dirty_rows.binary_search(&ime.row).is_ok()
             {
                 pass.set_vertex_buffer(0, self.ime_instance_buffer.slice(..));
                 pass.draw(0..6, 0..1);
             }
-            if let Err(error) =
-                self.glyph_renderer
-                    .render(&self.glyph_atlas, &self.glyph_viewport, &mut pass)
+            if glyphs_ready
+                && let Err(error) =
+                    self.glyph_renderer
+                        .render(&self.glyph_atlas, &self.glyph_viewport, &mut pass)
             {
                 eprintln!("terminal glyph rendering failed: {error}");
             }
-            if self.cursor.visible && (!self.cursor.blinking || self.cursor_phase) {
+            if cursor_row_dirty
+                && self.cursor.visible
+                && (!self.cursor.blinking || self.cursor_phase)
+            {
                 pass.set_pipeline(&self.cell_pipeline);
                 pass.set_bind_group(0, &self.viewport_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.cursor_buffer.slice(..));
@@ -508,6 +579,10 @@ impl GpuTerminalRenderer {
         self.render_pending = false;
         self.stats
             .record_render(full_surface, dirty_rows.len(), started.elapsed());
+        if !glyphs_ready {
+            self.dirty_rows = dirty_rows;
+            self.render_pending = true;
+        }
     }
 
     /// 推进闪烁相位；返回 true 表示调用方需要请求一次窗口重绘。
@@ -624,8 +699,12 @@ fn frame_is_complete(frame: &FramePatch) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{frame_is_complete, resources::rgba};
+    use super::{
+        frame_is_complete,
+        resources::{TEXTURE_FORMAT, rgba},
+    };
     use crate::terminal::{CursorPatch, FramePatch, RgbColor, RowPatch};
+    use slint::wgpu_29::wgpu;
 
     fn full_frame(rows: usize) -> FramePatch {
         FramePatch {
@@ -634,6 +713,7 @@ mod tests {
             rows,
             full_redraw: true,
             full_redraw_reason: Some(crate::terminal::FullRedrawReason::RendererRequest),
+            metadata_only: false,
             changed_rows: (0..rows)
                 .map(|row| RowPatch {
                     row,
@@ -646,13 +726,16 @@ mod tests {
             scroll_offset: 0,
             scroll_history_lines: 0,
             search: crate::terminal::SearchSnapshot::default(),
+            decorations: Vec::new(),
             title: None,
             exit_message: None,
         }
     }
 
     #[test]
-    fn preserves_srgb_values_for_slint_texture_composition() {
+    fn srgb_bytes_pass_through_unchanged_into_a_non_srgb_texture() {
+        // 颜色不做伽马变换，目标格式也不能再编码一次，否则 Slint 采样后会失真。
+        assert_eq!(TEXTURE_FORMAT, wgpu::TextureFormat::Rgba8Unorm);
         let color = rgba(
             RgbColor {
                 red: 0x0d,

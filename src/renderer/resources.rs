@@ -1,10 +1,12 @@
 //! 终端渲染使用的 WGPU 数据布局与资源构造。
 
-use crate::terminal::RgbColor;
+use crate::terminal::{RgbColor, RgbaColor};
 use bytemuck::{Pod, Zeroable};
 use slint::wgpu_29::wgpu;
 
-pub(super) const TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+/// 单元颜色与 glyphon（ColorMode::Web）都把 sRGB 字节原样当作输出值，因此目标必须是
+/// 非 sRGB 格式；Slint 的交换链同样是非 sRGB，整条链路不做任何伽马变换。
+pub(super) const TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// 与 cell.wgsl 顶点输入布局完全一致的单元实例数据。
 #[repr(C)]
@@ -28,6 +30,15 @@ pub(super) fn rgba(color: RgbColor, alpha: f32) -> [f32; 4] {
         f32::from(color.green) / 255.0,
         f32::from(color.blue) / 255.0,
         alpha,
+    ]
+}
+
+pub(super) fn rgba_from_theme(color: RgbaColor) -> [f32; 4] {
+    [
+        f32::from(color.red) / 255.0,
+        f32::from(color.green) / 255.0,
+        f32::from(color.blue) / 255.0,
+        f32::from(color.alpha) / 255.0,
     ]
 }
 

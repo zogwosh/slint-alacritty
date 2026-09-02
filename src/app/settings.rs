@@ -11,7 +11,7 @@ pub(super) use profiles::build_profile;
 pub(crate) use shortcuts::parse_shortcut;
 pub(super) use shortcuts::update_shortcut;
 pub(super) use storage::{SettingsWatcher, load_or_create};
-pub(super) use ui_sync::{sync_profile_draft, sync_settings_ui};
+pub(super) use ui_sync::{sync_font_metrics, sync_profile_draft, sync_settings_ui};
 
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, io, path::PathBuf};

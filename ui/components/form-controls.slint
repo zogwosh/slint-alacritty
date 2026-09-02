@@ -243,7 +243,8 @@ export component AppTextEdit inherits Rectangle {
         height: parent.height - 2 * DesignTokens.space-1;
         maximum: max(0px, editor.viewport-height - editor.height);
         page-size: editor.height;
-        value <=> editor.viewport-y;
+        value: editor.viewport-y;
+        value-requested(value) => { editor.viewport-y = value; }
     }
 }
 

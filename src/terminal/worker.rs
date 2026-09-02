@@ -13,6 +13,10 @@ use std::{
 
 /// 一帧最短间隔；连续 PTY 事件会在该窗口内合并。
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+/// 查询输入停止后再执行全量搜索，避免每个按键都扫描整段滚动历史。
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(130);
+/// 邮箱中累积的行补丁超过“整屏行数 × 该倍数”时放弃合并，改为请求一次完整重绘。
+const MAILBOX_ROW_PATCH_FACTOR: usize = 8;
 
 /// 工作线程主循环。没有待渲染内容时会阻塞等待消息，避免空转。
 pub(super) fn run_worker(
@@ -24,23 +28,33 @@ pub(super) fn run_worker(
 ) {
     let mut clipboard = Clipboard::new().ok();
     let mut frame_pending = true;
+    let mut active = true;
     let mut last_frame = Instant::now() - FRAME_INTERVAL;
+    let mut pending_search: Option<(String, Instant)> = None;
     backend.mark_dirty();
 
     loop {
-        // 有待渲染内容时只等到下一帧时间；空闲时则无限等待新命令。
-        let message = if frame_pending {
-            let wait = FRAME_INTERVAL.saturating_sub(last_frame.elapsed());
-            match receiver.recv_timeout(wait) {
+        // 有待渲染内容或待执行搜索时只等到最近的截止时间；空闲时则无限等待新命令。
+        let now = Instant::now();
+        let frame_wait = frame_pending.then(|| FRAME_INTERVAL.saturating_sub(last_frame.elapsed()));
+        let search_wait = pending_search
+            .as_ref()
+            .map(|(_, deadline)| deadline.saturating_duration_since(now));
+        let wait = match (frame_wait, search_wait) {
+            (Some(frame), Some(search)) => Some(frame.min(search)),
+            (Some(wait), None) | (None, Some(wait)) => Some(wait),
+            (None, None) => None,
+        };
+        let message = match wait {
+            Some(wait) => match receiver.recv_timeout(wait) {
                 Ok(message) => Some(message),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => break,
-            }
-        } else {
-            match receiver.recv() {
+            },
+            None => match receiver.recv() {
                 Ok(message) => Some(message),
                 Err(_) => break,
-            }
+            },
         };
 
         // 即使 PTY 的 Render 唤醒因队列已满而被合并，消费任一命令也会检查 dirty 状态。
@@ -113,10 +127,19 @@ pub(super) fn run_worker(
             }
             Some(WorkerMessage::SelectAll) => backend.select_all(),
             Some(WorkerMessage::Search(query)) => {
-                backend.update_search(query);
-                frame_pending = true;
+                // 清空查询要立即生效，让关闭查找框时高亮马上消失。
+                if query.is_empty() {
+                    pending_search = None;
+                    backend.update_search(query);
+                    frame_pending = true;
+                } else {
+                    pending_search = Some((query, Instant::now() + SEARCH_DEBOUNCE));
+                }
             }
             Some(WorkerMessage::SearchStep(previous)) => {
+                if let Some((query, _)) = pending_search.take() {
+                    backend.update_search(query);
+                }
                 backend.search_step(previous);
                 frame_pending = true;
             }
@@ -124,59 +147,125 @@ pub(super) fn run_worker(
                 backend.request_full_redraw();
                 frame_pending = true;
             }
+            Some(WorkerMessage::SetActive(value)) => {
+                active = value;
+                frame_pending = true;
+            }
             Some(WorkerMessage::Render) => frame_pending = true,
             Some(WorkerMessage::Shutdown) => break,
             None => {}
         }
 
+        if pending_search
+            .as_ref()
+            .is_some_and(|(_, deadline)| Instant::now() >= *deadline)
+            && let Some((query, _)) = pending_search.take()
+        {
+            backend.update_search(query);
+            frame_pending = true;
+        }
+
         if frame_pending && last_frame.elapsed() >= FRAME_INTERVAL {
-            if let Some(frame) = backend.take_frame() {
-                publish_frame(&latest_frame, frame);
+            let frame = if active {
+                backend.take_frame()
+            } else {
+                backend.take_metadata_frame()
+            };
+            let mut overflowed = false;
+            if let Some(frame) = frame {
+                overflowed = publish_frame(&latest_frame, frame) == MailboxState::Overflowed;
                 if !notification_pending.swap(true, Ordering::AcqRel) {
                     frame_notifier();
                 }
             }
             last_frame = Instant::now();
-            frame_pending = false;
+            // UI 长时间未消费时不再无界累积增量行，改用下一帧完整画面收敛。
+            if overflowed {
+                backend.request_full_redraw();
+            }
+            frame_pending = overflowed;
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MailboxState {
+    Merged,
+    Overflowed,
+}
+
 /// 把新帧写入单槽邮箱；列补丁保持捕获顺序，避免同一行的独立区间互相覆盖。
-fn publish_frame(latest_frame: &Mutex<Option<FramePatch>>, mut incoming: FramePatch) {
+/// 累积行数超过上限时丢弃全部行补丁并返回 Overflowed，由调用方请求完整重绘。
+fn publish_frame(latest_frame: &Mutex<Option<FramePatch>>, mut incoming: FramePatch) -> MailboxState {
     let mut slot = latest_frame.lock().expect("latest frame mutex poisoned");
     let Some(mut pending) = slot.take() else {
         *slot = Some(incoming);
-        return;
+        return MailboxState::Merged;
     };
 
-    // 尺寸或世代不一致时，旧补丁已经没有意义，直接以新帧替换。
+    // 后台元数据帧只携带标题/退出信息，不能覆盖已有的视口状态。
+    if incoming.metadata_only {
+        merge_metadata(&mut pending, &mut incoming);
+        *slot = Some(pending);
+        return MailboxState::Merged;
+    }
+    if pending.metadata_only {
+        merge_metadata(&mut incoming, &mut pending);
+        *slot = Some(incoming);
+        return MailboxState::Merged;
+    }
+
+    // 尺寸或世代不一致时，旧补丁已经没有意义，直接以新帧替换；标题/退出信息不能丢。
     if pending.generation != incoming.generation
         || pending.columns != incoming.columns
         || pending.rows != incoming.rows
         || incoming.full_redraw
     {
+        if incoming.title.is_none() {
+            incoming.title = pending.title.take();
+        }
+        if incoming.exit_message.is_none() {
+            incoming.exit_message = pending.exit_message.take();
+        }
         *slot = Some(incoming);
-        return;
+        return MailboxState::Merged;
     }
 
-    pending.changed_rows.append(&mut incoming.changed_rows);
+    let limit = pending.rows.max(1) * MAILBOX_ROW_PATCH_FACTOR;
+    let overflowed = pending.changed_rows.len() + incoming.changed_rows.len() > limit;
+    if overflowed {
+        pending.changed_rows.clear();
+        pending.full_redraw = false;
+        pending.full_redraw_reason = None;
+    } else {
+        pending.changed_rows.append(&mut incoming.changed_rows);
+    }
     pending.cursor = incoming.cursor;
     pending.scroll_offset = incoming.scroll_offset;
     pending.scroll_history_lines = incoming.scroll_history_lines;
-    pending.search = incoming.search;
-    if incoming.title.is_some() {
-        pending.title = incoming.title;
-    }
-    if incoming.exit_message.is_some() {
-        pending.exit_message = incoming.exit_message;
-    }
+    pending.search = std::mem::take(&mut incoming.search);
+    pending.decorations = std::mem::take(&mut incoming.decorations);
+    merge_metadata(&mut pending, &mut incoming);
     *slot = Some(pending);
+    if overflowed {
+        MailboxState::Overflowed
+    } else {
+        MailboxState::Merged
+    }
+}
+
+fn merge_metadata(target: &mut FramePatch, source: &mut FramePatch) {
+    if source.title.is_some() {
+        target.title = source.title.take();
+    }
+    if source.exit_message.is_some() {
+        target.exit_message = source.exit_message.take();
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::publish_frame;
+    use super::{MAILBOX_ROW_PATCH_FACTOR, MailboxState, publish_frame};
     use crate::terminal::frame::{CursorPatch, FramePatch, RowPatch};
     use std::sync::Mutex;
 
@@ -187,6 +276,7 @@ mod tests {
             rows: 24,
             full_redraw: false,
             full_redraw_reason: None,
+            metadata_only: false,
             changed_rows: changed_rows
                 .iter()
                 .map(|row| RowPatch {
@@ -200,6 +290,7 @@ mod tests {
             scroll_offset: 0,
             scroll_history_lines: 0,
             search: crate::terminal::SearchSnapshot::default(),
+            decorations: Vec::new(),
             title: None,
             exit_message: None,
         }
@@ -283,6 +374,55 @@ mod tests {
         let frame = slot.lock().unwrap().take().unwrap();
         assert_eq!(frame.scroll_offset, 17);
         assert_eq!(frame.scroll_history_lines, 64);
+    }
+
+    #[test]
+    fn mailbox_stops_accumulating_rows_and_asks_for_a_full_redraw() {
+        let slot = Mutex::new(None);
+        let rows = (0..24 * MAILBOX_ROW_PATCH_FACTOR).map(|row| row % 24).collect::<Vec<_>>();
+        assert_eq!(publish_frame(&slot, frame(0, &rows)), MailboxState::Merged);
+        let mut overflow = frame(0, &[3]);
+        overflow.title = Some("busy".into());
+        assert_eq!(publish_frame(&slot, overflow), MailboxState::Overflowed);
+
+        let frame = slot.lock().unwrap().take().unwrap();
+        assert!(frame.changed_rows.is_empty());
+        assert!(!frame.full_redraw);
+        assert_eq!(frame.title.as_deref(), Some("busy"));
+    }
+
+    #[test]
+    fn metadata_only_frames_never_replace_viewport_state() {
+        let slot = Mutex::new(None);
+        let mut pending = frame(0, &[1]);
+        pending.scroll_offset = 5;
+        publish_frame(&slot, pending);
+
+        let mut metadata = frame(0, &[]);
+        metadata.metadata_only = true;
+        metadata.exit_message = Some("Process exited".into());
+        publish_frame(&slot, metadata);
+
+        let frame = slot.lock().unwrap().take().unwrap();
+        assert!(!frame.metadata_only);
+        assert_eq!(frame.scroll_offset, 5);
+        assert_eq!(frame.changed_rows.len(), 1);
+        assert_eq!(frame.exit_message.as_deref(), Some("Process exited"));
+    }
+
+    #[test]
+    fn full_frame_replacement_keeps_pending_metadata() {
+        let slot = Mutex::new(None);
+        let mut pending = frame(0, &[1]);
+        pending.title = Some("title".into());
+        publish_frame(&slot, pending);
+        let mut full = frame(0, &[0]);
+        full.full_redraw = true;
+        publish_frame(&slot, full);
+
+        let frame = slot.lock().unwrap().take().unwrap();
+        assert!(frame.full_redraw);
+        assert_eq!(frame.title.as_deref(), Some("title"));
     }
 
     #[test]

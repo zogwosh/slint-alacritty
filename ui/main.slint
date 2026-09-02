@@ -53,8 +53,13 @@ export component MainWindow inherits Window {
     in property <[string]> mono-fonts;
     in property <string> terminal-font-family: "Cascadia Mono";
     in property <int> terminal-font-size: 15;
-    in property <length> terminal-cell-width: 9px;
-    in property <length> terminal-cell-height: 20px;
+    // 单元尺寸以物理像素整数为唯一真源（由 Rust 按当前缩放测量），逻辑尺寸只是派生值；
+    // 这样列边界、行裁剪与 PTY 上报的像素尺寸在任何 DPI 下都保持一致。
+    in property <float> scale-factor: 1.0;
+    in property <int> terminal-cell-width-px: 9;
+    in property <int> terminal-cell-height-px: 18;
+    private property <length> terminal-cell-width: root.terminal-cell-width-px * 1px / root.scale-factor;
+    private property <length> terminal-cell-height: root.terminal-cell-height-px * 1px / root.scale-factor;
     in-out property <int> settings-font-index;
     in-out property <int> settings-font-size: 15;
     in property <string> settings-message;
@@ -100,6 +105,11 @@ export component MainWindow inherits Window {
     out property <color> terminal-selection-text-token: DesignTokens.color-terminal-selection-text;
     out property <color> terminal-search-match-token: DesignTokens.color-terminal-search-match;
     out property <color> terminal-search-current-token: DesignTokens.color-terminal-search-current;
+
+    // 终端纹理必须落在整数物理像素上，否则会被双线性重采样而发虚。
+    pure function snap(value: length) -> length {
+        return round(value * root.scale-factor / 1px) * 1px / root.scale-factor;
+    }
 
     app-focus := FocusScope {
         width: 100%;
@@ -181,10 +191,10 @@ export component MainWindow inherits Window {
             }
 
             terminal-view := TerminalView {
-            x: DesignTokens.space-2-5;
-            y: title-bar.height + DesignTokens.space-2;
-            width: parent.width - 2 * DesignTokens.space-2-5;
-            height: parent.height - title-bar.height - DesignTokens.space-2 - DesignTokens.space-2-5;
+            x: root.snap(DesignTokens.space-2-5);
+            y: root.snap(title-bar.height + DesignTokens.space-2);
+            width: root.snap(parent.width - DesignTokens.space-2-5) - self.x;
+            height: root.snap(parent.height - DesignTokens.space-2-5) - self.y;
             frame: root.terminal-frame;
             terminal-active: root.terminal-active;
             exit-message: root.exit-message;

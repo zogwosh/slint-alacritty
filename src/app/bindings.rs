@@ -2,7 +2,7 @@
 
 use super::{
     input::{KeyAction, configured_key_action, normalize_key},
-    sessions::{TabManager, add_tab, close_tab, sync_tab_ui},
+    sessions::{TabManager, activate_session, add_tab, close_tab, physical_cell_size, sync_tab_ui},
     settings::{AppSettings, build_profile, sync_profile_draft, sync_settings_ui, update_shortcut},
 };
 use crate::{MainWindow, terminal::TerminalController};
@@ -207,14 +207,12 @@ pub(super) fn connect_resize(ui: &MainWindow, tabs: Rc<RefCell<TabManager>>) {
 
         let terminal_width = ui.get_terminal_width();
         let terminal_height = ui.get_terminal_height();
-        let cell_width = ui.get_cell_width();
-        let cell_height = ui.get_cell_height();
         // 最小化或布局尚未稳定时不调整 PTY，避免 shell 收到 1×1 一类尺寸。
         let invalid_viewport = ui.window().is_minimized()
             || !terminal_width.is_finite()
             || !terminal_height.is_finite()
-            || terminal_width <= cell_width
-            || terminal_height <= cell_height
+            || terminal_width <= ui.get_cell_width()
+            || terminal_height <= ui.get_cell_height()
             || columns <= 2
             || rows <= 1;
 
@@ -224,6 +222,7 @@ pub(super) fn connect_resize(ui: &MainWindow, tabs: Rc<RefCell<TabManager>>) {
         }
 
         if let Some(controller) = tabs.borrow().selected_controller() {
+            let (cell_width, cell_height) = physical_cell_size(&ui);
             controller.resize(columns as usize, rows as usize, cell_width, cell_height);
             if resize_suspended.replace(false) {
                 controller.request_full_redraw();
@@ -310,15 +309,8 @@ pub(super) fn connect_tabs(
         // 每个会话有独立帧历史；切换后要求活动会话重发完整画面。
         select_awaiting.set(true);
         if let Some(controller) = controller {
-            controller.resize(
-                ui.get_viewport_columns().max(2) as usize,
-                ui.get_viewport_rows().max(1) as usize,
-                ui.get_cell_width(),
-                ui.get_cell_height(),
-            );
-            controller.request_full_redraw();
+            activate_session(&ui, &select_awaiting, id, &controller);
         }
-        ui.invoke_frame_ready(id);
     });
 
     let weak_ui = ui.as_weak();
@@ -344,14 +336,7 @@ pub(super) fn connect_tabs(
             drop(manager);
             close_awaiting.set(true);
             if let Some((active_id, controller)) = active_session {
-                controller.resize(
-                    ui.get_viewport_columns().max(2) as usize,
-                    ui.get_viewport_rows().max(1) as usize,
-                    ui.get_cell_width(),
-                    ui.get_cell_height(),
-                );
-                controller.request_full_redraw();
-                ui.invoke_frame_ready(active_id);
+                activate_session(&ui, &close_awaiting, active_id, &controller);
             }
         } else {
             close_tab(&ui, &close_tabs, &close_awaiting, id);
@@ -547,20 +532,12 @@ pub(super) fn connect_tabs(
                 ui.set_settings_message_error(false);
                 sync_settings_ui(&ui, &settings, &font_fonts);
                 ui.set_settings_message("字体设置已应用。".into());
-                awaiting_full_frame.set(true);
                 if let Some((active_id, controller)) = tabs
                     .borrow()
                     .selected_session()
                     .map(|session| (session.id, session.controller.clone()))
                 {
-                    controller.resize(
-                        ui.get_viewport_columns().max(2) as usize,
-                        ui.get_viewport_rows().max(1) as usize,
-                        ui.get_cell_width(),
-                        ui.get_cell_height(),
-                    );
-                    controller.request_full_redraw();
-                    ui.invoke_frame_ready(active_id);
+                    activate_session(&ui, &awaiting_full_frame, active_id, &controller);
                 }
                 ui.window().request_redraw();
             }

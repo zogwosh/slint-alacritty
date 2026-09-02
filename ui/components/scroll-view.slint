@@ -1,12 +1,14 @@
 import { DesignTokens } from "../design-tokens.slint";
 
 // 项目统一的纵向滚动条。value 与 Flickable 一致：0px 为顶部，-maximum 为底部。
+// 滚动条自身从不写 value（对带绑定的属性赋值会永久移除绑定），
+// 只通过 value-requested 报告用户期望的位置，由使用方决定如何应用。
 export component AppScrollBar inherits Rectangle {
     in property <length> maximum: 0px;
     in property <length> page-size: 0px;
     in property <bool> wheel-changes-value: true;
-    in-out property <length> value: 0px;
-    callback scrolled;
+    in property <length> value: 0px;
+    callback value-requested(length);
     callback wheel(length, length, bool, bool, bool);
 
     private property <length> drag-offset;
@@ -50,22 +52,20 @@ export component AppScrollBar inherits Rectangle {
             }
             if (event.kind == PointerEventKind.down
                 || (event.kind == PointerEventKind.move && self.pressed)) {
-                root.value = -root.maximum
+                root.value-requested(-root.maximum
                     * max(
                         0px,
                         min(
                             parent.height - thumb.height,
                             self.mouse-y - root.drag-offset,
                         ),
-                    ) / max(1px, parent.height - thumb.height);
-                root.scrolled();
+                    ) / max(1px, parent.height - thumb.height));
             }
         }
 
         scroll-event(event) => {
             if (root.wheel-changes-value) {
-                root.value = max(-root.maximum, min(0px, root.value + event.delta-y));
-                root.scrolled();
+                root.value-requested(max(-root.maximum, min(0px, root.value + event.delta-y)));
             }
             root.wheel(
                 event.delta-y,
@@ -127,6 +127,7 @@ export component AppScrollView inherits Rectangle {
         height: parent.height - 2 * DesignTokens.space-1;
         maximum: max(0px, root.viewport-height - root.visible-height);
         page-size: root.visible-height;
-        value <=> root.viewport-y;
+        value: root.viewport-y;
+        value-requested(value) => { root.viewport-y = value; }
     }
 }

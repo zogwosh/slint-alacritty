@@ -1,7 +1,7 @@
 //! 轮询用户可编辑的 TOML 设置文件，并把变更同步到运行中的应用。
 
 use super::{
-    sessions::TabManager,
+    sessions::{TabManager, activate_session},
     settings::{AppSettings, SettingsWatcher, sync_profile_draft, sync_settings_ui},
 };
 use crate::MainWindow;
@@ -55,20 +55,12 @@ pub(super) fn start(
         ui.set_settings_message_error(error);
         ui.set_settings_message(message.into());
         if font_changed {
-            awaiting_full_frame.set(true);
             if let Some((active_id, controller)) = tabs
                 .borrow()
                 .selected_session()
                 .map(|session| (session.id, session.controller.clone()))
             {
-                controller.resize(
-                    ui.get_viewport_columns().max(2) as usize,
-                    ui.get_viewport_rows().max(1) as usize,
-                    ui.get_cell_width(),
-                    ui.get_cell_height(),
-                );
-                controller.request_full_redraw();
-                ui.invoke_frame_ready(active_id);
+                activate_session(&ui, &awaiting_full_frame, active_id, &controller);
             }
             ui.window().request_redraw();
         }

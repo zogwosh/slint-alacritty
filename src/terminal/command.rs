@@ -138,6 +138,8 @@ pub(super) enum WorkerMessage {
     Search(String),
     SearchStep(bool),
     ForceFullRedraw,
+    /// 会话是否正在被显示；后台会话只上报标题与退出状态，不做网格捕获。
+    SetActive(bool),
     Render,
     Shutdown,
 }

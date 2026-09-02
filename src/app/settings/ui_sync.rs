@@ -2,7 +2,17 @@
 
 use super::{AppSettings, ProfileKind, ShellProfile, shortcuts::shortcut_label};
 use crate::{MainWindow, ShellProfileData, ShortcutData, renderer::measure_cell};
-use slint::{ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+
+/// 以窗口当前缩放在物理像素下测量单元尺寸，并写入 Slint 作为唯一的度量真源。
+/// 缩放或字体变化时都必须重新调用。
+pub(crate) fn sync_font_metrics(ui: &MainWindow, settings: &AppSettings) {
+    let scale = ui.window().scale_factor().max(0.01);
+    let metrics = measure_cell(&settings.font_family, settings.font_size as f32 * scale);
+    ui.set_scale_factor(scale);
+    ui.set_terminal_cell_width_px(metrics.width.min(i32::MAX as u32) as i32);
+    ui.set_terminal_cell_height_px(metrics.height.min(i32::MAX as u32) as i32);
+}
 
 pub(crate) fn sync_settings_ui(ui: &MainWindow, settings: &AppSettings, mono_fonts: &[String]) {
     let profiles = settings
@@ -39,9 +49,7 @@ pub(crate) fn sync_settings_ui(ui: &MainWindow, settings: &AppSettings, mono_fon
     )));
     ui.set_terminal_font_family(settings.font_family.clone().into());
     ui.set_terminal_font_size(settings.font_size);
-    let (cell_width, cell_height) = measure_cell(&settings.font_family, settings.font_size as f32);
-    ui.set_terminal_cell_width(cell_width);
-    ui.set_terminal_cell_height(cell_height);
+    sync_font_metrics(ui, settings);
     ui.set_settings_font_size(settings.font_size);
     let font_index = mono_fonts
         .iter()

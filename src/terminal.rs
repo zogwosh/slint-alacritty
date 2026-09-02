@@ -15,9 +15,11 @@ mod worker;
 pub(crate) use controller::TerminalController;
 #[cfg(test)]
 pub(crate) use frame::{CursorPatch, RowPatch};
-pub(crate) use frame::{FramePatch, FullRedrawReason, TerminalCellPatch};
+pub(crate) use frame::{
+    DecorationKind, DecorationRange, FramePatch, FullRedrawReason, TerminalCellPatch,
+};
 pub(crate) use input::KeyInput;
-pub(crate) use palette::{RgbColor, TerminalTheme};
+pub(crate) use palette::{RgbColor, RgbaColor, TerminalTheme};
 #[cfg(test)]
 pub(crate) use search::SearchSnapshot;
 pub(crate) use ssh::respond_to_askpass_if_requested;

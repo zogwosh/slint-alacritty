@@ -3,7 +3,7 @@
 use crate::{
     MainWindow, TabData,
     app::settings::ShellProfile,
-    terminal::{FramePatch, RgbColor, TerminalController, TerminalTheme},
+    terminal::{FramePatch, RgbColor, RgbaColor, TerminalController, TerminalTheme},
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use std::{
@@ -62,6 +62,22 @@ impl TabManager {
     }
 }
 
+/// 终端单元的物理像素尺寸；PTY、GPU 渲染器与 Slint 布局共用这一整数度量。
+pub(super) fn physical_cell_size(ui: &MainWindow) -> (f32, f32) {
+    (
+        ui.get_terminal_cell_width_px().max(1) as f32,
+        ui.get_terminal_cell_height_px().max(1) as f32,
+    )
+}
+
+/// Slint 当前布局得出的字符网格尺寸。
+pub(super) fn viewport_grid(ui: &MainWindow) -> (usize, usize) {
+    (
+        ui.get_viewport_columns().max(2) as usize,
+        ui.get_viewport_rows().max(1) as usize,
+    )
+}
+
 /// 启动一个 PTY，并把后台的“有新帧”通知转发到 Slint 事件循环。
 pub(super) fn create_session(
     ui: &MainWindow,
@@ -71,11 +87,12 @@ pub(super) fn create_session(
     profile: Option<&ShellProfile>,
 ) -> io::Result<TerminalSession> {
     let weak_ui = ui.as_weak();
+    let (cell_width, cell_height) = physical_cell_size(ui);
     let controller = Rc::new(TerminalController::new(
         columns,
         rows,
-        ui.get_cell_width(),
-        ui.get_cell_height(),
+        cell_width,
+        cell_height,
         profile,
         terminal_theme(ui),
         move || {
@@ -104,10 +121,9 @@ pub(super) fn terminal_theme(ui: &MainWindow) -> TerminalTheme {
     TerminalTheme {
         background: rgb(ui.get_terminal_background_token()),
         foreground: rgb(ui.get_terminal_foreground_token()),
-        selection_background: rgb(ui.get_terminal_selection_token()),
-        selection_foreground: rgb(ui.get_terminal_selection_text_token()),
-        search_match_background: rgb(ui.get_terminal_search_match_token()),
-        search_current_background: rgb(ui.get_terminal_search_current_token()),
+        selection_background: rgba(ui.get_terminal_selection_token()),
+        search_match_background: rgba(ui.get_terminal_search_match_token()),
+        search_current_background: rgba(ui.get_terminal_search_current_token()),
     }
 }
 
@@ -116,6 +132,16 @@ fn rgb(color: slint::Color) -> RgbColor {
         red: color.red(),
         green: color.green(),
         blue: color.blue(),
+    }
+}
+
+/// 装饰色保留设计令牌中的透明度，使选区可以叠加在 ANSI 背景色之上。
+fn rgba(color: slint::Color) -> RgbaColor {
+    RgbaColor {
+        red: color.red(),
+        green: color.green(),
+        blue: color.blue(),
+        alpha: color.alpha(),
     }
 }
 
@@ -139,6 +165,11 @@ pub(super) fn sync_tab_ui(ui: &MainWindow, manager: &TabManager) {
         .collect::<Vec<_>>();
     ui.set_tabs(ModelRc::new(VecModel::from(model)));
     ui.set_settings_active(manager.settings_active);
+    // 只有正在显示的会话才需要完整的网格捕获；其余会话降级为只上报元数据。
+    let active_id = manager.active_id();
+    for session in &manager.sessions {
+        session.controller.set_active(Some(session.id) == active_id);
+    }
     if manager.settings_active {
         ui.set_active_tab_id(-1);
         ui.set_active_tab_index(manager.sessions.len().min(i32::MAX as usize) as i32);
@@ -171,13 +202,8 @@ pub(super) fn add_tab(
         manager.next_id += 1;
         id
     };
-    let session = match create_session(
-        ui,
-        id,
-        ui.get_viewport_columns().max(2) as usize,
-        ui.get_viewport_rows().max(1) as usize,
-        profile,
-    ) {
+    let (columns, rows) = viewport_grid(ui);
+    let session = match create_session(ui, id, columns, rows, profile) {
         Ok(session) => session,
         Err(error) => {
             eprintln!("failed to create terminal tab: {error}");
@@ -191,7 +217,27 @@ pub(super) fn add_tab(
     manager.settings_active = false;
     sync_tab_ui(ui, &manager);
     drop(manager);
+    activate_session(ui, awaiting_full_frame, id, &controller);
+}
+
+/// 让某个会话成为画面来源：对齐当前网格与搜索查询，并要求它重发完整画面。
+pub(super) fn activate_session(
+    ui: &MainWindow,
+    awaiting_full_frame: &Cell<bool>,
+    id: i32,
+    controller: &TerminalController,
+) {
     awaiting_full_frame.set(true);
+    let (columns, rows) = viewport_grid(ui);
+    let (cell_width, cell_height) = physical_cell_size(ui);
+    controller.resize(columns, rows, cell_width, cell_height);
+    // 查询文本由界面拥有，切换会话后要让新会话的高亮与之一致。
+    let query = if ui.get_search_open() {
+        ui.get_search_query().to_string()
+    } else {
+        String::new()
+    };
+    controller.update_search(query);
     controller.request_full_redraw();
     ui.invoke_frame_ready(id);
 }
@@ -237,8 +283,7 @@ pub(super) fn close_tab(
     }
     awaiting_full_frame.set(true);
     if let Some((id, controller)) = next_session {
-        controller.request_full_redraw();
-        ui.invoke_frame_ready(id);
+        activate_session(ui, awaiting_full_frame, id, &controller);
     }
 }
 
@@ -263,16 +308,18 @@ pub(super) fn apply_frame_metadata(
         return;
     };
     let mut changed = false;
-    session.scroll_offset = frame.scroll_offset.min(i32::MAX as usize) as i32;
-    session.scroll_history_lines = frame.scroll_history_lines.min(i32::MAX as usize) as i32;
-    session.cursor_column = frame.cursor.column.min(i32::MAX as usize) as i32;
-    session.cursor_row = frame.cursor.row.min(i32::MAX as usize) as i32;
-    if is_active {
+    if !frame.metadata_only {
+        session.scroll_offset = frame.scroll_offset.min(i32::MAX as usize) as i32;
+        session.scroll_history_lines = frame.scroll_history_lines.min(i32::MAX as usize) as i32;
+        session.cursor_column = frame.cursor.column.min(i32::MAX as usize) as i32;
+        session.cursor_row = frame.cursor.row.min(i32::MAX as usize) as i32;
+    }
+    if is_active && !frame.metadata_only {
         ui.set_scroll_offset(session.scroll_offset);
         ui.set_scroll_history_lines(session.scroll_history_lines);
         ui.set_terminal_cursor_column(session.cursor_column);
         ui.set_terminal_cursor_row(session.cursor_row);
-        ui.set_search_query(frame.search.query.as_str().into());
+        // 查询文本由搜索框拥有；后台快照可能落后于用户输入（防抖），只回传计数。
         ui.set_search_result_current(frame.search.current.min(i32::MAX as usize) as i32);
         ui.set_search_result_total(frame.search.total.min(i32::MAX as usize) as i32);
     }

@@ -11,6 +11,7 @@ use super::{
 };
 use crate::app::settings::ShellProfile;
 use std::{
+    cell::Cell,
     io,
     sync::{
         Arc, Mutex,
@@ -30,6 +31,8 @@ pub(crate) struct TerminalController {
     notification_pending: Arc<AtomicBool>,
     pending_resize: Arc<Mutex<CoalescedCommand<TerminalSize>>>,
     pending_scroll: Arc<Mutex<CoalescedCommand<usize>>>,
+    /// 上次通知给工作线程的显示状态，避免每次标签同步都重复入队。
+    active: Cell<bool>,
     worker_thread: Option<JoinHandle<()>>,
 }
 
@@ -78,8 +81,16 @@ impl TerminalController {
             notification_pending,
             pending_resize,
             pending_scroll,
+            active: Cell::new(true),
             worker_thread: Some(worker_thread),
         })
+    }
+
+    /// 告知工作线程该会话是否正在显示；后台会话停止网格捕获，只上报标题与退出状态。
+    pub(crate) fn set_active(&self, active: bool) {
+        if self.active.replace(active) != active {
+            let _ = self.worker_sender.send(WorkerMessage::SetActive(active));
+        }
     }
 
     pub(crate) fn send_key(

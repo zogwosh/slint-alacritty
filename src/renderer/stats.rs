@@ -3,9 +3,13 @@
 use crate::terminal::FullRedrawReason;
 use std::time::{Duration, Instant};
 
+/// 打开性能日志的环境变量；未设置时统计代码完全跳过。
+const PERF_ENV: &str = "SLINT_TERMINAL_PERF";
+
 /// 分别统计“应用帧补丁”和“提交 GPU 渲染”两个阶段。
 #[derive(Default)]
 pub(super) struct PerfStats {
+    enabled: bool,
     interval_started: Option<Instant>,
     applied_frames: u64,
     rendered_frames: u64,
@@ -15,6 +19,7 @@ pub(super) struct PerfStats {
     input_dirty_rows: u64,
     rendered_dirty_rows: u64,
     processed_cells: u64,
+    reshaped_rows: u64,
     text_spans: u64,
     uploaded_bytes: u64,
     apply_time: Duration,
@@ -24,16 +29,28 @@ pub(super) struct PerfStats {
 }
 
 impl PerfStats {
+    pub(super) fn from_environment() -> Self {
+        Self {
+            enabled: std::env::var_os(PERF_ENV).is_some_and(|value| !value.is_empty()),
+            ..Self::default()
+        }
+    }
+
     /// 累计一次补丁应用的工作量和 CPU 耗时。
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn record_apply(
         &mut self,
         full_redraw_reason: Option<FullRedrawReason>,
         dirty_rows: usize,
         cells: usize,
+        reshaped_rows: usize,
         text_spans: usize,
         bytes: usize,
         elapsed: Duration,
     ) {
+        if !self.enabled {
+            return;
+        }
         self.start_interval();
         self.applied_frames += 1;
         if let Some(reason) = full_redraw_reason {
@@ -42,6 +59,7 @@ impl PerfStats {
         }
         self.input_dirty_rows += dirty_rows as u64;
         self.processed_cells += cells as u64;
+        self.reshaped_rows += reshaped_rows as u64;
         self.text_spans += text_spans as u64;
         self.uploaded_bytes += bytes as u64;
         self.apply_time += elapsed;
@@ -55,6 +73,9 @@ impl PerfStats {
         dirty_rows: usize,
         elapsed: Duration,
     ) {
+        if !self.enabled {
+            return;
+        }
         self.start_interval();
         self.rendered_frames += 1;
         self.full_surface_renders += u64::from(full_surface);
@@ -77,7 +98,7 @@ impl PerfStats {
         }
 
         eprintln!(
-            "terminal-perf applied_frames={} rendered_frames={} patch_full_redraws={} full_surface_renders={} full_reasons=terminal_damage:{},renderer_request:{},resize:{} input_dirty_rows={} rendered_dirty_rows={} processed_cells={} text_spans={} upload_kib={:.1} apply_cpu_us_avg={} apply_cpu_us_p95={} apply_cpu_us_p99={} render_cpu_us_avg={} render_cpu_us_p95={} render_cpu_us_p99={}",
+            "terminal-perf applied_frames={} rendered_frames={} patch_full_redraws={} full_surface_renders={} full_reasons=terminal_damage:{},renderer_request:{},resize:{} input_dirty_rows={} rendered_dirty_rows={} processed_cells={} reshaped_rows={} text_spans={} upload_kib={:.1} apply_cpu_us_avg={} apply_cpu_us_p95={} apply_cpu_us_p99={} render_cpu_us_avg={} render_cpu_us_p95={} render_cpu_us_p99={}",
             self.applied_frames,
             self.rendered_frames,
             self.patch_full_redraws,
@@ -88,6 +109,7 @@ impl PerfStats {
             self.input_dirty_rows,
             self.rendered_dirty_rows,
             self.processed_cells,
+            self.reshaped_rows,
             self.text_spans,
             self.uploaded_bytes as f64 / 1024.0,
             average_us(self.apply_time, self.applied_frames),
@@ -98,6 +120,7 @@ impl PerfStats {
             percentile(&self.render_samples_us, 99),
         );
         *self = Self {
+            enabled: true,
             interval_started: Some(Instant::now()),
             ..Self::default()
         };

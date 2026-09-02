@@ -18,11 +18,11 @@ use super::{
 };
 use crate::app::settings::{ProfileKind, ShellProfile};
 use alacritty_terminal::{
-    event::{EventListener, WindowSize},
+    event::WindowSize,
     event_loop::{EventLoop, EventLoopSender, Msg},
     grid::{Dimensions, Scroll},
     index::{Column, Point, Side},
-    selection::{Selection, SelectionRange, SelectionType},
+    selection::{Selection, SelectionType},
     sync::FairMutex,
     term::{Config, Term},
     tty::{self, Options, Shell},
@@ -53,18 +53,9 @@ pub(super) struct TerminalBackend {
     selecting: bool,
     pressed_button: Option<MouseButton>,
     forced_full_redraw: Option<super::frame::FullRedrawReason>,
-    /// 上一帧已绘制的选择区，用于额外标记取消高亮的旧行。
-    rendered_selection: SelectionSnapshot,
     scroll_remainder: f32,
     search: SearchState,
     theme: TerminalTheme,
-}
-
-/// 只保留判断选择区绘制变化所需的数据。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct SelectionSnapshot {
-    range: Option<SelectionRange>,
-    display_offset: usize,
 }
 
 impl TerminalBackend {
@@ -126,7 +117,6 @@ impl TerminalBackend {
             selecting: false,
             pressed_button: None,
             forced_full_redraw: None,
-            rendered_selection: SelectionSnapshot::default(),
             scroll_remainder: 0.0,
             search: SearchState::default(),
             theme,
@@ -140,37 +130,54 @@ impl TerminalBackend {
         }
 
         let mut terminal = self.terminal.lock();
-        if self.search.refresh_if_due(&mut terminal) {
-            self.forced_full_redraw = Some(super::frame::FullRedrawReason::RendererRequest);
-        }
+        // 计数刷新只影响查找面板，高亮由视口搜索每帧重新得出，不需要重绘终端。
+        self.search.refresh_if_due(&mut terminal);
         let forced_full_redraw = self.forced_full_redraw.take();
-        let search = self.search.snapshot(&terminal);
-        let selection = selection_snapshot(&terminal);
-        // 选择区不是 Alacritty 单元本身的 damage，需要补上新旧范围涉及的行。
-        let selection_dirty_rows = if selection == self.rendered_selection {
-            Vec::new()
-        } else {
-            let mut rows = visible_selection_rows(self.rendered_selection, self.size.rows);
-            rows.extend(visible_selection_rows(selection, self.size.rows));
-            rows.sort_unstable();
-            rows.dedup();
-            rows
-        };
-        self.rendered_selection = selection;
+        let search = self.search.snapshot();
+        let search_matches = self.search.visible_matches(&terminal);
         let mut frame = capture_frame(
             &mut terminal,
             self.size.columns,
             self.size.rows,
             self.generation,
             forced_full_redraw,
-            &selection_dirty_rows,
             self.theme,
             search,
+            &search_matches,
         );
         drop(terminal);
         frame.title = self.notifier.take_title();
         frame.exit_message = self.notifier.take_exit_message();
         Some(frame)
+    }
+
+    /// 后台会话不捕获网格：只消费脏标记并在有标题/退出信息时产出一帧轻量元数据。
+    /// 期间累积的 damage 会在会话重新激活并请求完整重绘时一并覆盖。
+    pub(super) fn take_metadata_frame(&mut self) -> Option<FramePatch> {
+        if !self.notifier.begin_frame() {
+            return None;
+        }
+        let title = self.notifier.take_title();
+        let exit_message = self.notifier.take_exit_message();
+        if title.is_none() && exit_message.is_none() {
+            return None;
+        }
+        Some(FramePatch {
+            generation: self.generation,
+            columns: self.size.columns,
+            rows: self.size.rows,
+            full_redraw: false,
+            full_redraw_reason: None,
+            metadata_only: true,
+            changed_rows: Vec::new(),
+            cursor: super::frame::CursorPatch::default(),
+            scroll_offset: 0,
+            scroll_history_lines: 0,
+            search: self.search.snapshot(),
+            decorations: Vec::new(),
+            title,
+            exit_message,
+        })
     }
 
     pub(super) fn mark_dirty(&self) {
@@ -182,18 +189,19 @@ impl TerminalBackend {
         self.notifier.mark_dirty();
     }
 
+    /// 搜索状态只影响装饰层与查找面板，因此仅标记脏而不请求完整重绘。
     pub(super) fn update_search(&mut self, query: String) {
         let mut terminal = self.terminal.lock();
         self.search.set_query(&mut terminal, query);
         drop(terminal);
-        self.request_full_redraw();
+        self.notifier.mark_dirty();
     }
 
     pub(super) fn search_step(&mut self, previous: bool) {
         let mut terminal = self.terminal.lock();
         self.search.step(&mut terminal, previous);
         drop(terminal);
-        self.request_full_redraw();
+        self.notifier.mark_dirty();
     }
 
     pub(super) fn send_to_pty(&self, text: String) {
@@ -458,30 +466,6 @@ fn ssh_arguments(profile: &ShellProfile) -> Vec<String> {
     arguments
 }
 
-fn selection_snapshot<T: EventListener>(terminal: &Term<T>) -> SelectionSnapshot {
-    let content = terminal.renderable_content();
-    SelectionSnapshot {
-        range: content.selection,
-        display_offset: content.display_offset,
-    }
-}
-
-/// 把选择区裁剪到当前可见视口，返回需要重新绘制的行号。
-fn visible_selection_rows(snapshot: SelectionSnapshot, rows: usize) -> Vec<usize> {
-    let Some(range) = snapshot.range else {
-        return Vec::new();
-    };
-    let offset = snapshot.display_offset as i32;
-    let start = range.start.line.0 + offset;
-    let end = range.end.line.0 + offset;
-    if rows == 0 || end < 0 || start >= rows as i32 {
-        return Vec::new();
-    }
-    let start = start.max(0) as usize;
-    let end = end.min(rows as i32 - 1) as usize;
-    (start..=end).collect()
-}
-
 impl Drop for TerminalBackend {
     fn drop(&mut self) {
         // 关闭 PTY 事件循环并等待读取线程结束，避免会话资源泄漏。
@@ -515,12 +499,8 @@ fn window_size(size: TerminalSize) -> WindowSize {
 
 #[cfg(test)]
 mod tests {
-    use super::{SelectionSnapshot, encode_paste, ssh_arguments, visible_selection_rows};
+    use super::{encode_paste, ssh_arguments};
     use crate::app::settings::{ProfileKind, ShellProfile};
-    use alacritty_terminal::{
-        index::{Column, Line, Point},
-        selection::SelectionRange,
-    };
 
     #[test]
     fn paste_normalizes_lines_and_protects_bracketed_terminator() {
@@ -529,29 +509,6 @@ mod tests {
             encode_paste("one\x1b[201~two", true),
             b"\x1b[200~one[201~two\x1b[201~"
         );
-    }
-
-    #[test]
-    fn selection_damage_is_clipped_to_visible_rows() {
-        let snapshot = SelectionSnapshot {
-            range: Some(SelectionRange::new(
-                Point::new(Line(-2), Column(0)),
-                Point::new(Line(2), Column(5)),
-                false,
-            )),
-            display_offset: 0,
-        };
-        assert_eq!(visible_selection_rows(snapshot, 3), vec![0, 1, 2]);
-
-        let hidden = SelectionSnapshot {
-            range: Some(SelectionRange::new(
-                Point::new(Line(-4), Column(0)),
-                Point::new(Line(-2), Column(5)),
-                false,
-            )),
-            display_offset: 0,
-        };
-        assert!(visible_selection_rows(hidden, 3).is_empty());
     }
 
     #[test]
