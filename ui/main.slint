@@ -1,5 +1,4 @@
 import { DesignTokens } from "design-tokens.slint";
-import { Palette } from "std-widgets.slint";
 import { ShellProfileData, ShortcutData, TabData } from "models.slint";
 import { TitleBar } from "components/title-bar.slint";
 import { SettingsView } from "settings-view.slint";
@@ -9,7 +8,6 @@ export { ShellProfileData, ShortcutData, TabData }
 
 // 应用根窗口：负责组合标题栏和终端视图，并向 Rust 暴露统一接口。
 export component MainWindow inherits Window {
-    init => { Palette.color-scheme = ColorScheme.dark; }
     title: root.terminal-title;
     preferred-width: 900px;
     preferred-height: 540px;
@@ -26,6 +24,13 @@ export component MainWindow inherits Window {
     in property <string> exit-message;
     in property <int> scroll-offset;
     in property <int> scroll-history-lines;
+    in property <int> terminal-cursor-column;
+    in property <int> terminal-cursor-row;
+    in-out property <bool> search-open;
+    in-out property <string> search-query;
+    in property <int> search-result-current;
+    in property <int> search-result-total;
+    in property <int> search-focus-request;
     in property <[TabData]> tabs;
     in property <int> active-tab-id: -1;
     in property <int> active-tab-index: -1;
@@ -35,13 +40,21 @@ export component MainWindow inherits Window {
     in-out property <int> settings-section;
     in-out property <int> selected-profile-id: -1;
     in-out property <string> profile-name-draft;
+    in-out property <int> profile-kind-index;
     in-out property <string> profile-program-draft;
     in-out property <string> profile-arguments-draft;
     in-out property <string> profile-working-directory-draft;
     in-out property <string> profile-environment-draft;
+    in-out property <string> profile-ssh-host-draft;
+    in-out property <string> profile-ssh-user-draft;
+    in-out property <int> profile-ssh-port-draft: 22;
+    in-out property <string> profile-ssh-identity-file-draft;
+    in-out property <string> profile-ssh-password-draft;
     in property <[string]> mono-fonts;
     in property <string> terminal-font-family: "Cascadia Mono";
     in property <int> terminal-font-size: 15;
+    in property <length> terminal-cell-width: 9px;
+    in property <length> terminal-cell-height: 20px;
     in-out property <int> settings-font-index;
     in-out property <int> settings-font-size: 15;
     in property <string> settings-message;
@@ -51,11 +64,15 @@ export component MainWindow inherits Window {
     // application-key-input 返回 true 时，窗口级快捷键会阻止事件继续传给输入框或终端。
     callback application-key-input(string, bool, bool, bool, bool) -> bool;
     callback key-input(string, bool, bool, bool, bool);
+    callback ime-preedit(string);
     callback viewport-resized(int, int);
     callback frame-ready(int);
     callback mouse-input(int, int, int, int, bool, bool, bool, bool);
     callback mouse-scroll(int, int, float, bool, bool, bool);
     callback scroll-to(int);
+    callback search-query-changed(string);
+    callback search-step(bool);
+    callback dismiss-search;
     callback new-tab;
     callback new-tab-with-profile(int);
     callback open-settings;
@@ -63,7 +80,7 @@ export component MainWindow inherits Window {
     callback close-tab(int);
     callback select-profile(int);
     callback new-profile;
-    callback save-profile(int, string, string, string, string, string);
+    callback save-profile(int, string, int, string, string, string, string, string, string, int, string, string);
     callback set-default-profile(int);
     callback remove-profile(int);
     callback save-font(int, int);
@@ -77,6 +94,12 @@ export component MainWindow inherits Window {
     out property <int> viewport-rows: terminal-view.row-count;
     out property <length> terminal-width: terminal-view.width;
     out property <length> terminal-height: terminal-view.height;
+    out property <color> terminal-background-token: DesignTokens.color-terminal-background;
+    out property <color> terminal-foreground-token: DesignTokens.color-terminal-foreground;
+    out property <color> terminal-selection-token: DesignTokens.color-terminal-selection;
+    out property <color> terminal-selection-text-token: DesignTokens.color-terminal-selection-text;
+    out property <color> terminal-search-match-token: DesignTokens.color-terminal-search-match;
+    out property <color> terminal-search-current-token: DesignTokens.color-terminal-search-current;
 
     app-focus := FocusScope {
         width: 100%;
@@ -85,6 +108,28 @@ export component MainWindow inherits Window {
         capture-key-pressed(event) => {
             if (event.text == Key.AltGr) {
                 root.app-altgr-active = true;
+                return reject;
+            }
+
+            if root.search-open && event.text == Key.Escape {
+                root.dismiss-search();
+                return accept;
+            }
+            if root.search-open && event.text == Key.F3 {
+                root.search-step(event.modifiers.shift);
+                return accept;
+            }
+
+            // 设置页中的文本编辑快捷键必须继续传给获得焦点的 TextInput。
+            // 终端页仍沿用应用级 Ctrl/Alt 快捷键策略。
+            if (root.settings-active || terminal-view.search-input-focused)
+                && event.modifiers.control && !event.modifiers.alt
+                && (event.text == "a" || event.text == "A"
+                    || event.text == "c" || event.text == "C"
+                    || event.text == "v" || event.text == "V"
+                    || event.text == "x" || event.text == "X"
+                    || event.text == "y" || event.text == "Y"
+                    || event.text == "z" || event.text == "Z") {
                 return reject;
             }
             root.application-key-input(
@@ -126,6 +171,15 @@ export component MainWindow inherits Window {
             close-tab(id) => { root.close-tab(id); }
         }
 
+            // 保留终端四周的呼吸空间，但让留白与终端使用同一个背景 Token。
+            if !root.settings-active : Rectangle {
+                x: 0px;
+                y: title-bar.height;
+                width: parent.width;
+                height: parent.height - title-bar.height;
+                background: DesignTokens.color-terminal-background;
+            }
+
             terminal-view := TerminalView {
             x: DesignTokens.space-2-5;
             y: title-bar.height + DesignTokens.space-2;
@@ -136,12 +190,22 @@ export component MainWindow inherits Window {
             exit-message: root.exit-message;
             scroll-offset: root.scroll-offset;
             scroll-history-lines: root.scroll-history-lines;
+            cursor-column: root.terminal-cursor-column;
+            cursor-row: root.terminal-cursor-row;
+            search-open: root.search-open;
+            search-query <=> root.search-query;
+            search-result-current: root.search-result-current;
+            search-result-total: root.search-result-total;
+            search-focus-request: root.search-focus-request;
             font-family: root.terminal-font-family;
             font-size: root.terminal-font-size * 1px;
+            cell-width: root.terminal-cell-width;
+            cell-height: root.terminal-cell-height;
             visible: !root.settings-active;
             key-input(text, control, alt, shift, altgr) => {
                 root.key-input(text, control, alt, shift, altgr);
             }
+            ime-preedit(text) => { root.ime-preedit(text); }
             viewport-resized(columns, rows) => {
                 root.viewport-resized(columns, rows);
             }
@@ -152,6 +216,9 @@ export component MainWindow inherits Window {
                 root.mouse-scroll(column, row, lines, shift, alt, control);
             }
             scroll-to(offset) => { root.scroll-to(offset); }
+            search-query-changed(query) => { root.search-query-changed(query); }
+            search-step(previous) => { root.search-step(previous); }
+            dismiss-search => { root.dismiss-search(); }
         }
 
             settings-view := SettingsView {
@@ -165,10 +232,16 @@ export component MainWindow inherits Window {
             section <=> root.settings-section;
             selected-profile-id <=> root.selected-profile-id;
             profile-name <=> root.profile-name-draft;
+            profile-kind-index <=> root.profile-kind-index;
             profile-program <=> root.profile-program-draft;
             profile-arguments <=> root.profile-arguments-draft;
             profile-working-directory <=> root.profile-working-directory-draft;
             profile-environment <=> root.profile-environment-draft;
+            profile-ssh-host <=> root.profile-ssh-host-draft;
+            profile-ssh-user <=> root.profile-ssh-user-draft;
+            profile-ssh-port <=> root.profile-ssh-port-draft;
+            profile-ssh-identity-file <=> root.profile-ssh-identity-file-draft;
+            profile-ssh-password <=> root.profile-ssh-password-draft;
             mono-fonts: root.mono-fonts;
             font-index <=> root.settings-font-index;
             font-size <=> root.settings-font-size;
@@ -176,8 +249,10 @@ export component MainWindow inherits Window {
             message-error: root.settings-message-error;
             select-profile(id) => { root.select-profile(id); }
             new-profile => { root.new-profile(); }
-            save-profile(id, name, program, arguments, working-directory, environment) => {
-                root.save-profile(id, name, program, arguments, working-directory, environment);
+            save-profile(id, name, kind-index, program, arguments, working-directory, environment,
+                         ssh-host, ssh-user, ssh-port, ssh-identity-file, ssh-password) => {
+                root.save-profile(id, name, kind-index, program, arguments, working-directory,
+                    environment, ssh-host, ssh-user, ssh-port, ssh-identity-file, ssh-password);
             }
             set-default-profile(id) => { root.set-default-profile(id); }
             remove-profile(id) => { root.remove-profile(id); }

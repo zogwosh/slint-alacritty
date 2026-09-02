@@ -2,7 +2,7 @@
 
 use super::{
     platform::apply_native_window_rounding,
-    sessions::{TabManager, apply_frame_metadata},
+    sessions::{TabManager, apply_frame_metadata, terminal_theme},
 };
 use crate::{MainWindow, renderer::GpuTerminalRenderer};
 use slint::ComponentHandle;
@@ -51,6 +51,7 @@ pub(super) fn install_renderer(
                     ui.get_cell_height() * scale,
                     ui.get_terminal_font_size() as f32 * scale,
                     ui.get_terminal_font_family().as_str(),
+                    terminal_theme(&ui),
                 );
                 match gpu.image() {
                     Ok(image) => ui.set_terminal_frame(image),
@@ -170,5 +171,19 @@ pub(super) fn connect_frame_updates(
             }
         }
         ui.window().request_redraw();
+    });
+}
+
+/// TextInput 仅提供系统 IME 事件，预编辑文本由终端 GPU 管线自行绘制。
+pub(super) fn connect_ime(ui: &MainWindow, renderer: Rc<RefCell<Option<GpuTerminalRenderer>>>) {
+    let weak_ui = ui.as_weak();
+    ui.on_ime_preedit(move |text| {
+        let changed = renderer
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(|renderer| renderer.set_ime_preedit(text.as_str()));
+        if changed && let Some(ui) = weak_ui.upgrade() {
+            ui.window().request_redraw();
+        }
     });
 }

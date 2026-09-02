@@ -3,10 +3,11 @@
 use super::{AppSettings, ShortcutChord, ShortcutSetting};
 use std::collections::BTreeSet;
 
-const SHORTCUT_DEFINITIONS: [(&str, &str, &str); 7] = [
+const SHORTCUT_DEFINITIONS: [(&str, &str, &str); 8] = [
     ("copy", "复制", "Ctrl+C"),
     ("select-all", "全选", "Ctrl+A"),
     ("paste", "粘贴", "Ctrl+V"),
+    ("find", "搜索终端", "Ctrl+F"),
     ("interrupt", "中断终端", "Alt+C"),
     ("new-tab", "新建标签页", "Ctrl+T"),
     ("close-tab", "关闭标签页", "Ctrl+W"),
@@ -249,6 +250,24 @@ mod tests {
                 .shortcut,
             "Ctrl+W"
         );
+    }
+
+    #[test]
+    fn adds_find_shortcut_to_existing_settings() {
+        let mut settings = AppSettings::default();
+        settings
+            .shortcuts
+            .retain(|setting| setting.action != "find");
+
+        settings.normalize();
+
+        let find = settings
+            .shortcuts
+            .iter()
+            .find(|setting| setting.action == "find")
+            .unwrap();
+        assert_eq!(find.shortcut, "Ctrl+F");
+        assert!(!find.pass_through);
     }
 
     #[test]

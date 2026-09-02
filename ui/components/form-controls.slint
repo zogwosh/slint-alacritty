@@ -1,0 +1,615 @@
+import { DesignTokens } from "../design-tokens.slint";
+import { Icon, IconName } from "../icons/icon.slint";
+import { AppScrollBar, AppScrollView } from "scroll-view.slint";
+
+// 项目自有按钮：视觉、状态和键盘行为均由 Slint 基础元素组成。
+export component AppButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> primary;
+    callback clicked;
+
+    min-width: label.preferred-width + 2 * DesignTokens.space-4;
+    preferred-width: self.min-width;
+    min-height: DesignTokens.control-height;
+    preferred-height: DesignTokens.control-height;
+    horizontal-stretch: 0;
+    border-radius: DesignTokens.radius-md;
+    border-width: button-focus.has-focus
+        ? DesignTokens.focus-border-width : DesignTokens.border-width;
+    border-color: button-focus.has-focus
+        ? DesignTokens.color-focus-ring : DesignTokens.color-control-border;
+    background: !root.enabled ? DesignTokens.color-control-disabled
+        : root.primary
+            ? (button-touch.pressed ? DesignTokens.color-accent-pressed
+                : button-touch.has-hover ? DesignTokens.color-accent-hover
+                : DesignTokens.color-accent)
+            : (button-touch.pressed ? DesignTokens.color-control-pressed
+                : button-touch.has-hover ? DesignTokens.color-control-hover
+                : DesignTokens.color-control);
+    opacity: root.enabled ? 1 : DesignTokens.disabled-opacity;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+
+    animate background { duration: DesignTokens.motion-fast; }
+    animate border-color { duration: DesignTokens.motion-fast; }
+
+    label := Text {
+        width: 100%; height: 100%;
+        text: root.text;
+        color: root.primary ? DesignTokens.color-accent-foreground : DesignTokens.color-text;
+        font-family: DesignTokens.font-ui;
+        font-size: DesignTokens.text-xs;
+        font-weight: root.primary ? 600 : 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    button-focus := FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(event) => {
+            if root.enabled && (event.text == Key.Return || event.text == Key.Space) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    button-touch := TouchArea {
+        width: 100%; height: 100%;
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { button-focus.focus(); root.clicked(); }
+    }
+}
+
+// 单行输入框：复用 Slint TextInput 的文本与 IME 能力，外观完全由项目 Token 控制。
+export component AppLineEdit inherits Rectangle {
+    in-out property <string> text <=> text-input.text;
+    in property <string> placeholder-text;
+    in property <InputType> input-type: InputType.text;
+    in property <bool> enabled: true;
+    in property <bool> read-only;
+    in property <string> font-family: DesignTokens.font-ui;
+    in property <length> font-size: DesignTokens.text-xs;
+    out property <bool> has-focus: text-input.has-focus;
+    callback edited(string);
+    callback accepted(string);
+
+    min-width: DesignTokens.control-min-width;
+    min-height: DesignTokens.control-height;
+    preferred-height: DesignTokens.control-height;
+    horizontal-stretch: 1;
+    border-radius: DesignTokens.radius-md;
+    border-width: root.has-focus
+        ? DesignTokens.focus-border-width : DesignTokens.border-width;
+    border-color: root.has-focus
+        ? DesignTokens.color-focus-ring : DesignTokens.color-control-border;
+    background: root.enabled ? DesignTokens.color-input : DesignTokens.color-control-disabled;
+    opacity: root.enabled ? 1 : DesignTokens.disabled-opacity;
+    clip: true;
+    forward-focus: text-input;
+    accessible-role: AccessibleRole.text-input;
+    accessible-enabled: root.enabled;
+    accessible-value <=> root.text;
+    accessible-placeholder-text: root.placeholder-text;
+    accessible-read-only: root.read-only;
+    accessible-action-set-value(value) => {
+        if root.enabled && !root.read-only {
+            root.text = value;
+            root.edited(value);
+        }
+    }
+
+    animate border-color { duration: DesignTokens.motion-fast; }
+    animate background { duration: DesignTokens.motion-fast; }
+
+    placeholder := Text {
+        x: DesignTokens.control-padding-x;
+        width: parent.width - 2 * DesignTokens.control-padding-x;
+        height: 100%;
+        text: root.text.is-empty && text-input.preedit-text.is-empty
+            ? root.placeholder-text : "";
+        color: DesignTokens.color-text-muted;
+        font-family: root.font-family;
+        font-size: root.font-size;
+        vertical-alignment: center;
+        overflow: elide;
+        accessible-role: none;
+    }
+
+    text-input := TextInput {
+        x: DesignTokens.control-padding-x;
+        width: parent.width - 2 * DesignTokens.control-padding-x;
+        height: 100%;
+        enabled: root.enabled;
+        read-only: root.read-only;
+        single-line: true;
+        input-type: root.input-type;
+        color: DesignTokens.color-text;
+        font-family: root.font-family;
+        font-size: root.font-size;
+        vertical-alignment: center;
+        selection-background-color: DesignTokens.color-selection;
+        selection-foreground-color: DesignTokens.color-text;
+        accessible-role: none;
+        edited => { root.edited(self.text); }
+        accepted => { root.accepted(self.text); }
+    }
+}
+
+// 多行编辑器：项目自有边框、圆角和滚动条，TextInput 只承担底层编辑行为。
+export component AppTextEdit inherits Rectangle {
+    in-out property <string> text <=> text-input.text;
+    in property <string> placeholder-text;
+    in property <TextWrap> wrap: word-wrap;
+    in property <bool> enabled: true;
+    in property <bool> read-only;
+    in property <string> font-family: DesignTokens.font-ui;
+    in property <length> font-size: DesignTokens.text-xs;
+    out property <bool> has-focus: text-input.has-focus;
+    callback edited(string);
+
+    private property <length> viewport-x <=> editor.viewport-x;
+    private property <length> viewport-y <=> editor.viewport-y;
+
+    min-width: DesignTokens.control-min-width;
+    min-height: DesignTokens.text-editor-min-height;
+    horizontal-stretch: 1;
+    vertical-stretch: 1;
+    border-radius: DesignTokens.radius-md;
+    border-width: root.has-focus
+        ? DesignTokens.focus-border-width : DesignTokens.border-width;
+    border-color: root.has-focus
+        ? DesignTokens.color-focus-ring : DesignTokens.color-control-border;
+    background: root.enabled ? DesignTokens.color-input : DesignTokens.color-control-disabled;
+    opacity: root.enabled ? 1 : DesignTokens.disabled-opacity;
+    clip: true;
+    forward-focus: text-input;
+    accessible-role: AccessibleRole.text-input;
+    accessible-enabled: root.enabled;
+    accessible-value <=> root.text;
+    accessible-placeholder-text: root.placeholder-text;
+    accessible-read-only: root.read-only;
+    accessible-action-set-value(value) => {
+        if root.enabled && !root.read-only {
+            root.text = value;
+            root.edited(value);
+        }
+    }
+
+    animate border-color { duration: DesignTokens.motion-fast; }
+
+    editor := Flickable {
+        x: DesignTokens.control-padding-x;
+        y: DesignTokens.space-2;
+        width: parent.width - 2 * DesignTokens.control-padding-x - DesignTokens.space-2;
+        height: parent.height - 2 * DesignTokens.space-2;
+        interactive: true;
+        viewport-width: root.wrap == TextWrap.no-wrap
+            ? max(self.width, text-input.preferred-width) : self.width;
+        viewport-height: max(self.height, text-input.preferred-height);
+
+        text-input := TextInput {
+            width: root.wrap == TextWrap.no-wrap ? max(parent.width, self.preferred-width) : parent.width;
+            height: max(parent.height, self.preferred-height);
+            enabled: root.enabled;
+            read-only: root.read-only;
+            single-line: false;
+            wrap: root.wrap;
+            color: DesignTokens.color-text;
+            font-family: root.font-family;
+            font-size: root.font-size;
+            selection-background-color: DesignTokens.color-selection;
+            selection-foreground-color: DesignTokens.color-text;
+            accessible-role: none;
+            edited => { root.edited(self.text); }
+            cursor-position-changed(position) => {
+                if position.x + root.viewport-x < DesignTokens.space-2 {
+                    root.viewport-x = min(0px, -position.x + DesignTokens.space-2);
+                } else if position.x + root.viewport-x > editor.width - DesignTokens.space-2 {
+                    root.viewport-x = min(0px, editor.width - position.x - DesignTokens.space-2);
+                }
+                if position.y + root.viewport-y < DesignTokens.space-2 {
+                    root.viewport-y = min(0px, -position.y + DesignTokens.space-2);
+                } else if position.y + root.viewport-y > editor.height - root.font-size {
+                    root.viewport-y = min(0px, editor.height - position.y - root.font-size);
+                }
+            }
+        }
+    }
+
+    Text {
+        x: editor.x;
+        y: editor.y;
+        width: editor.width;
+        text: root.text.is-empty && text-input.preedit-text.is-empty
+            ? root.placeholder-text : "";
+        color: DesignTokens.color-text-muted;
+        font-family: root.font-family;
+        font-size: root.font-size;
+        wrap: root.wrap;
+        overflow: elide;
+        accessible-role: none;
+    }
+
+    AppScrollBar {
+        x: parent.width - self.width - DesignTokens.space-1;
+        y: DesignTokens.space-1;
+        height: parent.height - 2 * DesignTokens.space-1;
+        maximum: max(0px, editor.viewport-height - editor.height);
+        page-size: editor.height;
+        value <=> editor.viewport-y;
+    }
+}
+
+// 项目自有下拉选择器；PopupWindow 内部列表同样由基础元素绘制。
+export component AppComboBox inherits Rectangle {
+    in property <[string]> model;
+    in-out property <int> current-index: -1;
+    in property <bool> enabled: true;
+    callback selected(int);
+
+    private property <length> popup-item-height: DesignTokens.control-height;
+    private property <string> current-text:
+        root.current-index >= 0 && root.current-index < root.model.length
+            ? root.model[root.current-index] : "";
+
+    min-width: DesignTokens.control-min-width;
+    min-height: DesignTokens.control-height;
+    preferred-height: DesignTokens.control-height;
+    horizontal-stretch: 1;
+    border-radius: DesignTokens.radius-md;
+    border-width: combo-focus.has-focus
+        ? DesignTokens.focus-border-width : DesignTokens.border-width;
+    border-color: combo-focus.has-focus
+        ? DesignTokens.color-focus-ring : DesignTokens.color-control-border;
+    background: !root.enabled ? DesignTokens.color-control-disabled
+        : combo-touch.pressed ? DesignTokens.color-control-pressed
+        : combo-touch.has-hover ? DesignTokens.color-control-hover
+        : DesignTokens.color-control;
+    opacity: root.enabled ? 1 : DesignTokens.disabled-opacity;
+    accessible-role: combobox;
+    accessible-enabled: root.enabled;
+    accessible-value: root.current-text;
+    accessible-action-default => { if root.enabled { combo-popup.show(); } }
+
+    animate background { duration: DesignTokens.motion-fast; }
+    animate border-color { duration: DesignTokens.motion-fast; }
+
+    Text {
+        x: DesignTokens.control-padding-x;
+        width: parent.width - 2 * DesignTokens.control-padding-x - DesignTokens.icon-menu-chevron-size;
+        height: 100%;
+        text: root.current-text;
+        color: DesignTokens.color-text;
+        font-family: DesignTokens.font-ui;
+        font-size: DesignTokens.text-xs;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Icon {
+        x: parent.width - self.width - DesignTokens.control-padding-x;
+        y: (parent.height - self.height) / 2;
+        name: IconName.chevron-down;
+        size: DesignTokens.icon-menu-chevron-size;
+        color: DesignTokens.color-icon;
+    }
+
+    combo-focus := FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(event) => {
+            if !root.enabled { return reject; }
+            if event.text == Key.UpArrow && root.current-index > 0 {
+                root.current-index -= 1;
+                root.selected(root.current-index);
+                return accept;
+            }
+            if event.text == Key.DownArrow && root.current-index + 1 < root.model.length {
+                root.current-index += 1;
+                root.selected(root.current-index);
+                return accept;
+            }
+            if event.text == Key.Return || event.text == Key.Space {
+                combo-popup.show();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    combo-touch := TouchArea {
+        width: 100%; height: 100%;
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { combo-focus.focus(); combo-popup.show(); }
+    }
+
+    combo-popup := PopupWindow {
+        x: 0px;
+        y: root.height + DesignTokens.space-1;
+        width: root.width;
+        height: min(
+            DesignTokens.popup-max-height,
+            root.model.length * root.popup-item-height + 2 * DesignTokens.space-1,
+        );
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            width: 100%; height: 100%;
+            border-radius: DesignTokens.radius-lg;
+            border-width: DesignTokens.border-width;
+            border-color: DesignTokens.color-control-border;
+            background: DesignTokens.color-popup;
+            clip: true;
+
+            options-scroll := AppScrollView {
+                x: DesignTokens.space-1;
+                y: DesignTokens.space-1;
+                width: parent.width - 2 * DesignTokens.space-1;
+                height: parent.height - 2 * DesignTokens.space-1;
+                viewport-width: self.visible-width;
+                viewport-height: max(self.visible-height, root.model.length * root.popup-item-height);
+
+                options-list := VerticalLayout {
+                    width: parent.viewport-width;
+                    height: root.model.length * root.popup-item-height;
+                    spacing: 0px;
+
+                    for option[index] in root.model : Rectangle {
+                        height: root.popup-item-height;
+                    border-radius: DesignTokens.radius-sm;
+                    background: option-touch.pressed ? DesignTokens.color-control-pressed
+                        : option-touch.has-hover ? DesignTokens.color-control-hover
+                        : index == root.current-index ? DesignTokens.color-surface-active
+                        : transparent;
+                    accessible-role: list-item;
+                    accessible-label: option;
+                    accessible-action-default => {
+                        root.current-index = index;
+                        root.selected(index);
+                        combo-popup.close();
+                    }
+
+                    if index == root.current-index : Icon {
+                        x: DesignTokens.space-2;
+                        y: (parent.height - self.height) / 2;
+                        name: IconName.check;
+                        size: DesignTokens.text-xs;
+                        color: DesignTokens.color-accent;
+                    }
+
+                    Text {
+                        x: 2 * DesignTokens.space-2 + DesignTokens.text-xs;
+                        width: parent.width - self.x - DesignTokens.space-2;
+                        height: 100%;
+                        text: option;
+                        color: DesignTokens.color-text;
+                        font-family: DesignTokens.font-ui;
+                        font-size: DesignTokens.text-xs;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                        option-touch := TouchArea {
+                            width: 100%; height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.current-index = index;
+                                root.selected(index);
+                                combo-popup.close();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// 项目自有整数输入框，支持键入、滚轮与步进按钮。
+export component AppSpinBox inherits Rectangle {
+    in property <int> minimum;
+    in property <int> maximum: 100;
+    in property <int> step-size: 1;
+    in property <bool> enabled: true;
+    in property <bool> read-only;
+    in-out property <int> value: root.minimum;
+    callback edited(int);
+
+    private property <string> draft: "\{root.value}";
+    out property <bool> has-focus: number-input.has-focus;
+
+    public function update-value(next: int) {
+        let bounded = max(root.minimum, min(root.maximum, next));
+        if root.value != bounded {
+            root.value = bounded;
+            root.edited(bounded);
+        }
+        root.draft = "\{root.value}";
+    }
+
+    changed value => { root.draft = "\{root.value}"; }
+
+    min-width: DesignTokens.control-min-width;
+    min-height: DesignTokens.control-height;
+    preferred-height: DesignTokens.control-height;
+    horizontal-stretch: 1;
+    border-radius: DesignTokens.radius-md;
+    border-width: root.has-focus
+        ? DesignTokens.focus-border-width : DesignTokens.border-width;
+    border-color: root.has-focus
+        ? DesignTokens.color-focus-ring : DesignTokens.color-control-border;
+    background: root.enabled ? DesignTokens.color-input : DesignTokens.color-control-disabled;
+    opacity: root.enabled ? 1 : DesignTokens.disabled-opacity;
+    clip: true;
+    forward-focus: number-input;
+    accessible-role: spinbox;
+    accessible-enabled: root.enabled;
+    accessible-value: root.draft;
+    accessible-action-set-value(text) => {
+        if text.is-float() { root.update-value(round(text.to-float())); }
+    }
+
+    number-input := TextInput {
+        x: DesignTokens.control-padding-x;
+        width: parent.width - 2 * DesignTokens.control-padding-x - 2 * DesignTokens.control-stepper-width;
+        height: 100%;
+        text <=> root.draft;
+        enabled: root.enabled;
+        read-only: root.read-only;
+        single-line: true;
+        input-type: InputType.number;
+        color: DesignTokens.color-text;
+        font-family: DesignTokens.font-ui;
+        font-size: DesignTokens.text-xs;
+        vertical-alignment: center;
+        selection-background-color: DesignTokens.color-selection;
+        selection-foreground-color: DesignTokens.color-text;
+        accessible-role: none;
+        edited => {
+            if self.text.is-float() {
+                root.update-value(round(self.text.to-float()));
+            }
+        }
+        accepted => {
+            if self.text.is-float() {
+                root.update-value(round(self.text.to-float()));
+            } else {
+                root.draft = "\{root.value}";
+            }
+        }
+    }
+
+    TouchArea {
+        width: parent.width - 2 * DesignTokens.control-stepper-width;
+        height: 100%;
+        enabled: root.enabled && !root.read-only;
+        scroll-event(event) => {
+            if event.delta-y > 0px {
+                root.update-value(root.value + root.step-size);
+                return accept;
+            }
+            if event.delta-y < 0px {
+                root.update-value(root.value - root.step-size);
+                return accept;
+            }
+            reject
+        }
+    }
+
+    for step[index] in [1, -1] : Rectangle {
+        x: parent.width - (2 - index) * DesignTokens.control-stepper-width;
+        width: DesignTokens.control-stepper-width;
+        height: 100%;
+        background: step-touch.pressed ? DesignTokens.color-control-pressed
+            : step-touch.has-hover ? DesignTokens.color-control-hover : transparent;
+
+        Rectangle {
+            x: 0px;
+            width: DesignTokens.border-width;
+            height: 100%;
+            background: DesignTokens.color-control-border;
+        }
+
+        Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            name: index == 0 ? IconName.chevron-up : IconName.chevron-down;
+            size: DesignTokens.text-xs;
+            color: DesignTokens.color-icon;
+        }
+
+        step-touch := TouchArea {
+            width: 100%; height: 100%;
+            enabled: root.enabled && !root.read-only;
+            mouse-cursor: pointer;
+            clicked => { root.update-value(root.value + step * root.step-size); }
+        }
+    }
+}
+
+// 项目自有复选框。
+export component AppCheckBox inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in-out property <bool> checked;
+    callback toggled(bool);
+
+    min-width: box.width + DesignTokens.space-2 + label.preferred-width;
+    preferred-width: self.min-width;
+    min-height: max(DesignTokens.control-check-size, label.preferred-height);
+    preferred-height: self.min-height;
+    horizontal-stretch: 0;
+    accessible-role: checkbox;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-checked: root.checked;
+    accessible-action-default => {
+        if root.enabled { root.checked = !root.checked; root.toggled(root.checked); }
+    }
+
+    box := Rectangle {
+        x: 0px;
+        y: (parent.height - self.height) / 2;
+        width: DesignTokens.control-check-size;
+        height: DesignTokens.control-check-size;
+        border-radius: DesignTokens.radius-sm;
+        border-width: check-focus.has-focus
+            ? DesignTokens.focus-border-width : DesignTokens.border-width;
+        border-color: check-focus.has-focus
+            ? DesignTokens.color-focus-ring : DesignTokens.color-control-border;
+        background: root.checked ? DesignTokens.color-accent
+            : check-touch.pressed ? DesignTokens.color-control-pressed
+            : check-touch.has-hover ? DesignTokens.color-control-hover
+            : DesignTokens.color-input;
+
+        if root.checked : Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            name: IconName.check;
+            size: DesignTokens.text-xs;
+            color: DesignTokens.color-accent-foreground;
+        }
+    }
+
+    label := Text {
+        x: box.width + DesignTokens.space-2;
+        width: parent.width - self.x;
+        height: 100%;
+        text: root.text;
+        color: DesignTokens.color-text;
+        font-family: DesignTokens.font-ui;
+        font-size: DesignTokens.text-xs;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    check-focus := FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(event) => {
+            if root.enabled && event.text == Key.Space {
+                root.checked = !root.checked;
+                root.toggled(root.checked);
+                return accept;
+            }
+            reject
+        }
+    }
+
+    check-touch := TouchArea {
+        width: 100%; height: 100%;
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            check-focus.focus();
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+}

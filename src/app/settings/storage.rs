@@ -136,7 +136,7 @@ fn settings_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{load_or_create_at, parse};
-    use crate::app::settings::{AppSettings, ShellProfile};
+    use crate::app::settings::{AppSettings, ProfileKind, ShellProfile};
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},
@@ -177,5 +177,40 @@ mod tests {
         });
         let contents = toml::to_string(&settings).unwrap();
         assert!(parse(&contents).unwrap_err().contains("完整路径"));
+    }
+
+    #[test]
+    fn profile_without_kind_remains_a_local_shell() {
+        let program = std::env::current_exe().unwrap();
+        let contents = format!(
+            "default_profile_id = 1\nnext_profile_id = 2\n\
+             [[profiles]]\nid = 1\nname = \"Legacy\"\nprogram = {:?}\n",
+            program.to_string_lossy()
+        );
+        let settings = parse(&contents).unwrap();
+        assert_eq!(settings.profiles[0].kind, ProfileKind::Local);
+    }
+
+    #[test]
+    fn ssh_profile_round_trips_through_toml() {
+        let mut settings = AppSettings::default();
+        settings.profiles.push(ShellProfile {
+            id: 1,
+            name: "Production".to_owned(),
+            kind: ProfileKind::Ssh,
+            ssh_host: "example.com".to_owned(),
+            ssh_user: "deploy".to_owned(),
+            ssh_password: "plain-text-password".to_owned(),
+            ..ShellProfile::default()
+        });
+        settings.default_profile_id = Some(1);
+        let contents = toml::to_string_pretty(&settings).unwrap();
+        assert!(contents.contains("kind = \"ssh\""));
+        assert!(contents.contains("ssh_password = \"plain-text-password\""));
+        assert!(!contents.contains("program = \"\""));
+        let restored = parse(&contents).unwrap();
+        assert_eq!(restored.profiles[0].kind, ProfileKind::Ssh);
+        assert_eq!(restored.profiles[0].ssh_host, "example.com");
+        assert_eq!(restored.profiles[0].ssh_password, "plain-text-password");
     }
 }

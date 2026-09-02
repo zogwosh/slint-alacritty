@@ -1,9 +1,12 @@
+import { DesignTokens } from "../design-tokens.slint";
+
 // 项目级图标入口：业务组件只引用语义名称，不直接依赖字符字形或资源路径。
 // 新增图标时，把 SVG 放到 assets/，并在 IconName 与 source 映射中各加一项。
 export enum IconName {
     add,
     check,
     chevron-down,
+    chevron-up,
     chevron-left,
     chevron-right,
     close,
@@ -14,7 +17,7 @@ export enum IconName {
 
 export component Icon inherits Image {
     in property <IconName> name;
-    in property <brush> color: #ffffff;
+    in property <brush> color: DesignTokens.color-icon;
     in property <length> size: 16px;
 
     width: root.size;
@@ -23,6 +26,7 @@ export component Icon inherits Image {
     source: root.name == IconName.add ? @image-url("assets/add.svg")
         : root.name == IconName.check ? @image-url("assets/check.svg")
         : root.name == IconName.chevron-down ? @image-url("assets/chevron-down.svg")
+        : root.name == IconName.chevron-up ? @image-url("assets/chevron-up.svg")
         : root.name == IconName.chevron-left ? @image-url("assets/chevron-left.svg")
         : root.name == IconName.chevron-right ? @image-url("assets/chevron-right.svg")
         : root.name == IconName.window-close ? @image-url("assets/window-close.svg")

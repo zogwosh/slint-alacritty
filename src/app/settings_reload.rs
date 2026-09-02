@@ -58,7 +58,7 @@ pub(super) fn start(
             awaiting_full_frame.set(true);
             if let Some((active_id, controller)) = tabs
                 .borrow()
-                .active_session()
+                .selected_session()
                 .map(|session| (session.id, session.controller.clone()))
             {
                 controller.resize(

@@ -2,6 +2,7 @@ import { DesignTokens } from "../design-tokens.slint";
 import { Icon, IconName } from "../icons/icon.slint";
 import { TabData } from "../models.slint";
 import { IconButton } from "icon-button.slint";
+import { AppScrollView } from "scroll-view.slint";
 
 // 标签页下拉菜单：在标签较多或溢出时提供完整列表和快速切换入口。
 export component TabDropdown inherits Rectangle {
@@ -55,22 +56,82 @@ export component TabDropdown inherits Rectangle {
             background: DesignTokens.color-surface-active;
             clip: true;
 
-            VerticalLayout {
-                padding: DesignTokens.space-2;
-                spacing: DesignTokens.space-1;
+            Text {
+                x: DesignTokens.space-2;
+                y: DesignTokens.space-2;
+                width: parent.width - 2 * DesignTokens.space-2;
+                height: root.menu-header-height;
+                text: "标签页";
+                color: DesignTokens.color-text-muted;
+                font-family: DesignTokens.font-ui;
+                font-size: DesignTokens.text-xs;
+                vertical-alignment: center;
+            }
+
+            settings-item := Rectangle {
+                x: DesignTokens.space-2;
+                y: parent.height - DesignTokens.space-2 - root.menu-item-height;
+                width: parent.width - 2 * DesignTokens.space-2;
+                height: root.menu-item-height;
+                border-radius: DesignTokens.radius-sm;
+                background: settings-touch.pressed
+                    ? DesignTokens.color-control-pressed
+                    : settings-touch.has-hover ? DesignTokens.color-control-hover
+                    : transparent;
+                accessible-role: button;
+                accessible-label: "设置";
+                accessible-action-default => {
+                    root.open-settings();
+                    tab-menu.close();
+                }
 
                 Text {
-                    height: root.menu-header-height;
-                    text: "标签页";
-                    color: DesignTokens.color-text-muted;
+                    x: DesignTokens.space-2;
+                    width: parent.width - 2 * DesignTokens.space-2;
+                    height: 100%;
+                    text: "设置";
+                    color: DesignTokens.color-text;
                     font-family: DesignTokens.font-ui;
                     font-size: DesignTokens.text-xs;
                     vertical-alignment: center;
                 }
 
-                for tab in root.tabs : Rectangle {
-                    height: root.menu-item-height;
-                    visible: !tab.is-settings;
+                settings-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.open-settings();
+                        tab-menu.close();
+                    }
+                }
+            }
+
+            Rectangle {
+                x: DesignTokens.space-2;
+                y: settings-item.y - DesignTokens.space-1 - 1px;
+                width: parent.width - 2 * DesignTokens.space-2;
+                height: 1px;
+                background: DesignTokens.color-border;
+            }
+
+            tabs-scroll := AppScrollView {
+                x: DesignTokens.space-2;
+                y: DesignTokens.space-2 + root.menu-header-height + DesignTokens.space-1;
+                width: parent.width - 2 * DesignTokens.space-2;
+                height: max(0px, settings-item.y - DesignTokens.space-2 - self.y);
+                viewport-width: self.visible-width;
+                viewport-height: max(
+                    self.visible-height,
+                    root.tabs.length * (root.menu-item-height + DesignTokens.space-1),
+                );
+
+                tab-list := VerticalLayout {
+                    width: parent.viewport-width;
+                    height: root.tabs.length * (root.menu-item-height + DesignTokens.space-1);
+                    spacing: DesignTokens.space-1;
+
+                    for tab in root.tabs : Rectangle {
+                        height: tab.is-settings ? 0px : root.menu-item-height;
+                        visible: !tab.is-settings;
                     border-radius: DesignTokens.radius-sm;
                     background: item-touch.pressed
                         ? DesignTokens.color-control-pressed
@@ -106,50 +167,12 @@ export component TabDropdown inherits Rectangle {
                         vertical-alignment: center;
                     }
 
-                    item-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            root.select-tab(tab.id);
-                            tab-menu.close();
-                        }
-                    }
-                }
-
-                Rectangle {
-                    height: 1px;
-                    background: DesignTokens.color-border;
-                }
-
-                Rectangle {
-                    height: root.menu-item-height;
-                    border-radius: DesignTokens.radius-sm;
-                    background: settings-touch.pressed
-                        ? DesignTokens.color-control-pressed
-                        : settings-touch.has-hover ? DesignTokens.color-control-hover
-                        : transparent;
-                    accessible-role: button;
-                    accessible-label: "设置";
-                    accessible-action-default => {
-                        root.open-settings();
-                        tab-menu.close();
-                    }
-
-                    Text {
-                        x: DesignTokens.space-2;
-                        width: parent.width - 2 * DesignTokens.space-2;
-                        height: 100%;
-                        text: "设置";
-                        color: DesignTokens.color-text;
-                        font-family: DesignTokens.font-ui;
-                        font-size: DesignTokens.text-xs;
-                        vertical-alignment: center;
-                    }
-
-                    settings-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            root.open-settings();
-                            tab-menu.close();
+                        item-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.select-tab(tab.id);
+                                tab-menu.close();
+                            }
                         }
                     }
                 }

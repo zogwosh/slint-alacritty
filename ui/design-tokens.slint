@@ -12,9 +12,9 @@ export global DesignTokens {
     out property <length> space-5: 20px;
 
     // 圆角刻度。
-    out property <length> radius-sm: 4px;
-    out property <length> radius-md: 5px;
-    out property <length> radius-lg: 7px;
+    out property <length> radius-sm: 6px;
+    out property <length> radius-md: 8px;
+    out property <length> radius-lg: 10px;
     out property <length> radius-full: 999px;
 
     // 字体与字号刻度。
@@ -26,27 +26,44 @@ export global DesignTokens {
     out property <length> text-base: 16px;
     out property <length> text-lg: 20px;
 
-    // 按用途命名的语义颜色。
-    out property <color> color-canvas: #0d1117;
-    out property <color> color-surface: #171c22;
-    out property <color> color-surface-hover: #293039;
-    out property <color> color-surface-active: #30363d;
-    out property <color> color-control-hover: #3b424b;
-    out property <color> color-control-pressed: #454d57;
-    out property <color> color-border: #2a3038;
-    out property <color> color-text: #f0f3f6;
-    out property <color> color-text-muted: #9da7b3;
-    out property <color> color-text-subtle: #aab4bf;
-    out property <color> color-icon: #b8c0ca;
-    out property <color> color-success: #4cc38a;
-    out property <color> color-idle: #66717d;
-    out property <color> color-scrollbar-track: #20262dcc;
-    out property <color> color-warning: #f0b84b;
-    out property <color> color-danger-surface: #d9303742;
+    // 按用途命名的语义颜色；这是 GUI 与终端共同使用的唯一视觉来源。
+    out property <color> color-canvas: #1c1c1e;
+    out property <color> color-surface: #262626;
+    out property <color> color-surface-hover: #2c2c2e;
+    out property <color> color-surface-active: #3a3a3c;
+    out property <color> color-popup: #2c2c2e;
+    out property <color> color-input: #2c2c2e;
+    out property <color> color-control: #3a3a3c;
+    out property <color> color-control-hover: #48484a;
+    out property <color> color-control-pressed: #636366;
+    out property <color> color-control-disabled: #2c2c2e;
+    out property <color> color-control-border: #545458;
+    out property <color> color-border: #48484a;
+    out property <color> color-accent: #0a84ff;
+    out property <color> color-accent-hover: #409cff;
+    out property <color> color-accent-pressed: #0060df;
+    out property <color> color-accent-foreground: #ffffff;
+    out property <color> color-focus-ring: #0a84ff;
+    out property <color> color-selection: #0a84ff66;
+    out property <color> color-text: #f2f2f7;
+    out property <color> color-text-muted: #aeaeb2;
+    out property <color> color-text-subtle: #c7c7cc;
+    out property <color> color-icon: #d1d1d6;
+    out property <color> color-success: #28cd41;
+    out property <color> color-idle: #8e8e93;
+    out property <color> color-scrollbar-track: #3a3a3ccc;
+    out property <color> color-warning: #ff9500;
+    out property <color> color-danger-surface: #ff3b3042;
     out property <color> color-traffic-symbol: #2a2020a8;
     out property <color> color-window-close: #ff5f57;
     out property <color> color-window-minimize: #febc2e;
     out property <color> color-window-maximize: #28c840;
+    out property <color> color-terminal-background: #1c1c1e;
+    out property <color> color-terminal-foreground: #f2f2f7;
+    out property <color> color-terminal-selection: #0a84ff73;
+    out property <color> color-terminal-selection-text: #ffffff;
+    out property <color> color-terminal-search-match: #9c7500;
+    out property <color> color-terminal-search-current: #ffcc00;
 
     // 组件尺寸令牌。
     out property <length> titlebar-height: 44px;
@@ -65,4 +82,20 @@ export global DesignTokens {
     out property <length> add-button-width: 34px;
     out property <length> status-height: 22px;
     out property <length> terminal-cell-height: 20px;
+    out property <length> control-height: 30px;
+    out property <length> control-padding-x: 10px;
+    out property <length> control-stepper-width: 24px;
+    out property <length> control-check-size: 18px;
+    out property <length> control-min-width: 120px;
+    out property <length> text-editor-min-height: 72px;
+    out property <length> popup-max-height: 280px;
+    out property <length> search-panel-width: 400px;
+    out property <length> search-panel-height: 38px;
+    out property <length> search-input-min-width: 140px;
+    out property <length> search-count-width: 58px;
+    out property <length> search-action-size: 28px;
+    out property <length> border-width: 1px;
+    out property <length> focus-border-width: 2px;
+    out property <float> disabled-opacity: 0.55;
+    out property <duration> motion-fast: 150ms;
 }

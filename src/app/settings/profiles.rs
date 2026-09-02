@@ -1,40 +1,62 @@
 //! Shell Profile 的校验、规范化和系统探测。
 
-use super::{AppSettings, ShellProfile};
+use super::{AppSettings, ProfileKind, ShellProfile};
 use std::{
     collections::{BTreeSet, HashMap},
     env,
     path::{Path, PathBuf},
 };
 
+// 参数与 Slint 的扁平 Profile 编辑回调一一对应，避免为表单传输引入额外领域模型。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_profile(
     id: i32,
     name: &str,
+    kind_index: i32,
     program: &str,
     arguments: &str,
     working_directory: &str,
     environment: &str,
+    ssh_host: &str,
+    ssh_user: &str,
+    ssh_port: i32,
+    ssh_identity_file: &str,
+    ssh_password: &str,
 ) -> Result<ShellProfile, String> {
     let name = name.trim();
     if name.is_empty() {
         return Err("错误：Profile 名称不能为空".to_owned());
     }
-    let program = validate_program(program)?;
-    let working_directory = validate_working_directory(working_directory)?;
-    let environment = parse_environment(environment)?;
-    Ok(ShellProfile {
-        id,
-        name: name.to_owned(),
-        program,
-        arguments: arguments
-            .lines()
-            .map(str::trim)
-            .filter(|argument| !argument.is_empty())
-            .map(ToOwned::to_owned)
-            .collect(),
-        working_directory,
-        environment,
-    })
+    let kind = match kind_index {
+        0 => ProfileKind::Local,
+        1 => ProfileKind::Ssh,
+        _ => return Err("错误：Profile 类型无效".to_owned()),
+    };
+    let arguments = parse_arguments(arguments);
+    match kind {
+        ProfileKind::Local => Ok(ShellProfile {
+            id,
+            name: name.to_owned(),
+            kind,
+            program: validate_program(program)?,
+            arguments,
+            working_directory: validate_working_directory(working_directory)?,
+            environment: parse_environment(environment)?,
+            ..ShellProfile::default()
+        }),
+        ProfileKind::Ssh => Ok(ShellProfile {
+            id,
+            name: name.to_owned(),
+            kind,
+            arguments,
+            ssh_host: validate_ssh_host(ssh_host)?,
+            ssh_user: validate_ssh_user(ssh_user)?,
+            ssh_port: validate_ssh_port(ssh_port)?,
+            ssh_identity_file: validate_identity_file(ssh_identity_file)?,
+            ssh_password: validate_ssh_password(ssh_password)?,
+            ..ShellProfile::default()
+        }),
+    }
 }
 
 pub(super) fn validate_profiles(settings: &AppSettings) -> Result<(), String> {
@@ -49,17 +71,41 @@ pub(super) fn validate_profiles(settings: &AppSettings) -> Result<(), String> {
         if profile.name.trim().is_empty() {
             return Err(format!("Profile {} 的名称不能为空", profile.id));
         }
-        validate_program(&profile.program)
-            .map_err(|error| format!("Profile {}：{}", profile.id, error_without_prefix(&error)))?;
-        if let Some(directory) = &profile.working_directory {
-            validate_working_directory(&directory.to_string_lossy()).map_err(|error| {
-                format!("Profile {}：{}", profile.id, error_without_prefix(&error))
-            })?;
-        }
-        for key in profile.environment.keys() {
-            validate_environment_key(key).map_err(|message| {
-                format!("Profile {}：环境变量名称无效：{message}", profile.id)
-            })?;
+        match profile.kind {
+            ProfileKind::Local => {
+                validate_program(&profile.program).map_err(|error| {
+                    format!("Profile {}：{}", profile.id, error_without_prefix(&error))
+                })?;
+                if let Some(directory) = &profile.working_directory {
+                    validate_working_directory(&directory.to_string_lossy()).map_err(|error| {
+                        format!("Profile {}：{}", profile.id, error_without_prefix(&error))
+                    })?;
+                }
+                for key in profile.environment.keys() {
+                    validate_environment_key(key).map_err(|message| {
+                        format!("Profile {}：环境变量名称无效：{message}", profile.id)
+                    })?;
+                }
+            }
+            ProfileKind::Ssh => {
+                validate_ssh_host(&profile.ssh_host).map_err(|error| {
+                    format!("Profile {}：{}", profile.id, error_without_prefix(&error))
+                })?;
+                validate_ssh_user(&profile.ssh_user).map_err(|error| {
+                    format!("Profile {}：{}", profile.id, error_without_prefix(&error))
+                })?;
+                validate_ssh_port(i32::from(profile.ssh_port)).map_err(|error| {
+                    format!("Profile {}：{}", profile.id, error_without_prefix(&error))
+                })?;
+                if let Some(identity_file) = &profile.ssh_identity_file {
+                    validate_identity_file(&identity_file.to_string_lossy()).map_err(|error| {
+                        format!("Profile {}：{}", profile.id, error_without_prefix(&error))
+                    })?;
+                }
+                validate_ssh_password(&profile.ssh_password).map_err(|error| {
+                    format!("Profile {}：{}", profile.id, error_without_prefix(&error))
+                })?;
+            }
         }
     }
     if let Some(id) = settings.default_profile_id
@@ -107,12 +153,18 @@ pub(super) fn normalize_profiles(settings: &mut AppSettings) {
     settings.shells.clear();
     settings.default_shell = None;
     let mut next_id = 1;
-    settings
-        .profiles
-        .retain(|profile| !profile.name.trim().is_empty() && !profile.program.trim().is_empty());
+    settings.profiles.retain(|profile| {
+        !profile.name.trim().is_empty()
+            && match profile.kind {
+                ProfileKind::Local => !profile.program.trim().is_empty(),
+                ProfileKind::Ssh => !profile.ssh_host.trim().is_empty(),
+            }
+    });
     for profile in &mut settings.profiles {
         profile.name = profile.name.trim().to_owned();
         profile.program = profile.program.trim().trim_matches('"').to_owned();
+        profile.ssh_host = profile.ssh_host.trim().to_owned();
+        profile.ssh_user = profile.ssh_user.trim().to_owned();
         profile
             .arguments
             .retain(|argument| !argument.trim().is_empty());
@@ -129,6 +181,15 @@ pub(super) fn normalize_profiles(settings: &mut AppSettings) {
     {
         settings.default_profile_id = settings.profiles.first().map(|profile| profile.id);
     }
+}
+
+fn parse_arguments(arguments: &str) -> Vec<String> {
+    arguments
+        .lines()
+        .map(str::trim)
+        .filter(|argument| !argument.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn validate_program(program: &str) -> Result<String, String> {
@@ -159,6 +220,63 @@ fn validate_working_directory(directory: &str) -> Result<Option<PathBuf>, String
         return Err(format!("错误：工作目录不存在：{directory}"));
     }
     Ok(Some(path))
+}
+
+fn validate_ssh_host(host: &str) -> Result<String, String> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err("错误：SSH 主机不能为空".to_owned());
+    }
+    if host.chars().any(char::is_whitespace) || host.chars().any(char::is_control) {
+        return Err("错误：SSH 主机不能包含空白或控制字符".to_owned());
+    }
+    if host.starts_with('-') {
+        return Err("错误：SSH 主机不能以 - 开头".to_owned());
+    }
+    Ok(host.to_owned())
+}
+
+fn validate_ssh_user(user: &str) -> Result<String, String> {
+    let user = user.trim();
+    if user.chars().any(char::is_whitespace) || user.chars().any(char::is_control) {
+        return Err("错误：SSH 用户名不能包含空白或控制字符".to_owned());
+    }
+    if user.contains('@') {
+        return Err("错误：SSH 用户名不能包含 @".to_owned());
+    }
+    if user.starts_with('-') {
+        return Err("错误：SSH 用户名不能以 - 开头".to_owned());
+    }
+    Ok(user.to_owned())
+}
+
+fn validate_ssh_port(port: i32) -> Result<u16, String> {
+    u16::try_from(port)
+        .ok()
+        .filter(|port| *port > 0)
+        .ok_or_else(|| "错误：SSH 端口必须在 1 到 65535 之间".to_owned())
+}
+
+fn validate_identity_file(path: &str) -> Result<Option<PathBuf>, String> {
+    let path = path.trim().trim_matches('"');
+    if path.is_empty() {
+        return Ok(None);
+    }
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err("错误：SSH 私钥文件必须是完整路径".to_owned());
+    }
+    if !path.is_file() {
+        return Err(format!("错误：找不到 SSH 私钥文件：{}", path.display()));
+    }
+    Ok(Some(path))
+}
+
+fn validate_ssh_password(password: &str) -> Result<String, String> {
+    if password.contains(['\0', '\r', '\n']) {
+        return Err("错误：SSH 密码不能包含空字符或换行符".to_owned());
+    }
+    Ok(password.to_owned())
 }
 
 fn parse_environment(input: &str) -> Result<HashMap<String, String>, String> {
@@ -254,8 +372,8 @@ fn detected_profiles() -> Vec<(String, String, Vec<String>)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_environment, validate_profiles};
-    use crate::app::settings::{AppSettings, ShellProfile};
+    use super::{build_profile, parse_environment, validate_profiles};
+    use crate::app::settings::{AppSettings, ProfileKind, ShellProfile};
     use std::path::PathBuf;
 
     #[test]
@@ -305,5 +423,58 @@ mod tests {
                 .unwrap_err()
                 .contains("工作目录必须是完整路径")
         );
+    }
+
+    #[test]
+    fn builds_an_ssh_profile_without_local_shell_fields() {
+        let profile = build_profile(
+            -1,
+            "Production",
+            1,
+            "",
+            "-A\n-J\njump-host",
+            "",
+            "",
+            "example.com",
+            "deploy",
+            2222,
+            "",
+            "secret",
+        )
+        .unwrap();
+        assert_eq!(profile.kind, ProfileKind::Ssh);
+        assert_eq!(profile.ssh_host, "example.com");
+        assert_eq!(profile.ssh_user, "deploy");
+        assert_eq!(profile.ssh_port, 2222);
+        assert_eq!(profile.arguments, ["-A", "-J", "jump-host"]);
+        assert_eq!(profile.ssh_password, "secret");
+        assert!(profile.program.is_empty());
+        assert!(profile.environment.is_empty());
+    }
+
+    #[test]
+    fn ssh_profile_rejects_an_option_shaped_host() {
+        let error = build_profile(-1, "Bad", 1, "", "", "", "", "-V", "", 22, "", "").unwrap_err();
+        assert!(error.contains("不能以 - 开头"));
+    }
+
+    #[test]
+    fn ssh_profile_rejects_a_multiline_password() {
+        let error = build_profile(
+            -1,
+            "Bad password",
+            1,
+            "",
+            "",
+            "",
+            "",
+            "example.com",
+            "deploy",
+            22,
+            "",
+            "first\nsecond",
+        )
+        .unwrap_err();
+        assert!(error.contains("换行符"));
     }
 }

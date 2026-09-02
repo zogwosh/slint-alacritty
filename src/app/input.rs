@@ -11,6 +11,7 @@ pub(super) enum KeyAction {
     Copy,
     SelectAll,
     Paste,
+    Find,
     Interrupt,
     NewTab,
     CloseTab,
@@ -64,6 +65,7 @@ fn shortcut_action(action: &str) -> Option<KeyAction> {
         "copy" => Some(KeyAction::Copy),
         "select-all" => Some(KeyAction::SelectAll),
         "paste" => Some(KeyAction::Paste),
+        "find" => Some(KeyAction::Find),
         "interrupt" => Some(KeyAction::Interrupt),
         "new-tab" => Some(KeyAction::NewTab),
         "close-tab" => Some(KeyAction::CloseTab),
@@ -214,6 +216,10 @@ mod tests {
         assert_eq!(
             configured_key_action(&settings, "t", true, false, false, false).action,
             Some(KeyAction::NewTab)
+        );
+        assert_eq!(
+            configured_key_action(&settings, "f", true, false, false, false).action,
+            Some(KeyAction::Find)
         );
         assert_eq!(
             configured_key_action(&settings, "W", true, false, false, false).action,

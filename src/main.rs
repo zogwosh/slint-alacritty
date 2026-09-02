@@ -13,6 +13,11 @@ mod terminal;
 slint::include_modules!();
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(result) = terminal::respond_to_askpass_if_requested() {
+        result?;
+        return Ok(());
+    }
+    terminal::setup_environment();
     // 终端画面由自定义 WGPU 渲染器生成，因此这里固定使用可共享纹理的后端组合。
     slint::BackendSelector::new()
         .backend_name("winit".into())

@@ -27,15 +27,74 @@ pub(crate) struct ShortcutSetting {
     pub(crate) pass_through: bool,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProfileKind {
+    #[default]
+    Local,
+    Ssh,
+}
+
+impl ProfileKind {
+    fn is_local(kind: &Self) -> bool {
+        *kind == Self::Local
+    }
+}
+
+fn default_ssh_port() -> u16 {
+    22
+}
+
+fn is_default_ssh_port(port: &u16) -> bool {
+    *port == default_ssh_port()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct ShellProfile {
     pub(crate) id: i32,
     pub(crate) name: String,
+    #[serde(skip_serializing_if = "ProfileKind::is_local")]
+    pub(crate) kind: ProfileKind,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) program: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) arguments: Vec<String>,
     pub(crate) working_directory: Option<PathBuf>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub(crate) environment: HashMap<String, String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) ssh_host: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) ssh_user: String,
+    #[serde(
+        default = "default_ssh_port",
+        skip_serializing_if = "is_default_ssh_port"
+    )]
+    pub(crate) ssh_port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) ssh_identity_file: Option<PathBuf>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) ssh_password: String,
+}
+
+impl Default for ShellProfile {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            name: String::new(),
+            kind: ProfileKind::Local,
+            program: String::new(),
+            arguments: Vec::new(),
+            working_directory: None,
+            environment: HashMap::new(),
+            ssh_host: String::new(),
+            ssh_user: String::new(),
+            ssh_port: default_ssh_port(),
+            ssh_identity_file: None,
+            ssh_password: String::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

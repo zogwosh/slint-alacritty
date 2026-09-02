@@ -1,9 +1,10 @@
 import { DesignTokens } from "design-tokens.slint";
 import { StatusBadge } from "components/status-badge.slint";
 import { AppScrollBar } from "components/scroll-view.slint";
+import { SearchPanel } from "components/search-panel.slint";
 
 export component TerminalView inherits Rectangle {
-    background: DesignTokens.color-canvas;
+    background: DesignTokens.color-terminal-background;
 
     in property <image> frame;
     in property <string> font-family: DesignTokens.font-mono;
@@ -12,23 +13,36 @@ export component TerminalView inherits Rectangle {
     in property <string> exit-message;
     in property <int> scroll-offset;
     in property <int> scroll-history-lines;
-    // 用十个等宽字符实测单元宽度，比复制一个固定像素值更能适应字体度量。
-    out property <length> cell-width: font-probe.preferred-width / 10;
-    out property <length> cell-height: root.font-size + 5px;
+    in property <int> cursor-column;
+    in property <int> cursor-row;
+    in property <bool> search-open;
+    in-out property <string> search-query;
+    in property <int> search-result-current;
+    in property <int> search-result-total;
+    in property <int> search-focus-request;
+    out property <bool> search-input-focused: search-panel.input-focused;
+    // 由 glyphon 使用实际渲染字体测量，PTY 网格与 GPU 排版共享同一套度量。
+    in property <length> cell-width: 9px;
+    in property <length> cell-height: root.font-size + 5px;
     out property <int> column-count: max(2, floor(self.width / self.cell-width));
     out property <int> row-count: max(1, floor(self.height / self.cell-height));
 
     // 这些回调只描述 UI 事件；具体 ANSI 编码和终端模式判断在 Rust 中完成。
     callback key-input(string, bool, bool, bool, bool);
+    callback ime-preedit(string);
     callback viewport-resized(int, int);
     callback mouse-input(int, int, int, int, bool, bool, bool, bool);
     callback mouse-scroll(int, int, float, bool, bool, bool);
     callback scroll-to(int);
+    callback search-query-changed(string);
+    callback search-step(bool);
+    callback dismiss-search;
     // Slint 的后续字符事件不一定保留 AltGr 身份，因此单独跟踪按下状态。
     private property <bool> altgr-active;
     private property <bool> mouse-shift;
     private property <bool> mouse-alt;
     private property <bool> mouse-control;
+    private property <string> ime-preedit-text: terminal-input.preedit-text;
 
     // Slint 的响应式属性变化会主动通知 Rust 调整 PTY 字符网格。
     changed column-count => {
@@ -37,16 +51,51 @@ export component TerminalView inherits Rectangle {
     changed row-count => {
         root.viewport-resized(root.column-count, root.row-count);
     }
+    changed ime-preedit-text => {
+        root.ime-preedit(root.ime-preedit-text);
+    }
+    changed search-open => {
+        if root.search-open {
+            search-panel.focus-search();
+        } else {
+            terminal-input.focus();
+        }
+    }
+    changed search-focus-request => {
+        if root.search-open {
+            search-panel.focus-search();
+        }
+    }
 
     terminal-focus := FocusScope {
         width: 100%;
         height: 100%;
         focus-on-click: true;
 
-        key-pressed(event) => {
+        capture-key-pressed(event) => {
             if (event.text == Key.AltGr) {
                 root.altgr-active = true;
-            } else if (root.terminal-active) {
+                return reject;
+            }
+            if root.search-input-focused {
+                return reject;
+            }
+            if root.terminal-active && !root.altgr-active
+                && (event.modifiers.control || event.modifiers.alt
+                    || event.text == Key.Return || event.text == Key.Backspace
+                    || event.text == Key.Tab || event.text == Key.Backtab
+                    || event.text == Key.Escape || event.text == Key.UpArrow
+                    || event.text == Key.DownArrow || event.text == Key.LeftArrow
+                    || event.text == Key.RightArrow || event.text == Key.Home
+                    || event.text == Key.End || event.text == Key.Delete
+                    || event.text == Key.Insert || event.text == Key.PageUp
+                    || event.text == Key.PageDown || event.text == Key.F1
+                    || event.text == Key.F2 || event.text == Key.F3
+                    || event.text == Key.F4 || event.text == Key.F5
+                    || event.text == Key.F6 || event.text == Key.F7
+                    || event.text == Key.F8 || event.text == Key.F9
+                    || event.text == Key.F10 || event.text == Key.F11
+                    || event.text == Key.F12) {
                 root.key-input(
                     event.text,
                     event.modifiers.control,
@@ -54,17 +103,16 @@ export component TerminalView inherits Rectangle {
                     event.modifiers.shift,
                     root.altgr-active,
                 );
+                return accept;
             }
-            accept
+            reject
         }
 
-        key-released(event) => {
+        capture-key-released(event) => {
             if (event.text == Key.AltGr) {
                 root.altgr-active = false;
-                accept
-            } else {
-                reject
             }
+            reject
         }
 
         // frame 是 Rust/WGPU 生成的整张终端纹理，Slint 只负责合成显示。
@@ -75,12 +123,31 @@ export component TerminalView inherits Rectangle {
             image-fit: fill;
         }
 
-        // 不可见的字体探针仅用于计算 Cascadia Mono 的实际字符宽度。
-        font-probe := Text {
-            visible: false;
-            text: "0000000000";
+        // Slint 1.17 只把 IME composition 交给 TextInput。输入代理位于终端光标处，
+        // 既能正确定位候选窗，也会把提交后的文本立即转发给 PTY。
+        terminal-input := TextInput {
+            x: min(parent.width - 1px, max(0px, root.cursor-column * root.cell-width));
+            y: min(parent.height - root.cell-height, max(0px, root.cursor-row * root.cell-height));
+            width: max(root.cell-width, parent.width - self.x);
+            height: root.cell-height;
+            enabled: root.terminal-active;
+            // 只作为系统 IME 桥；预编辑字形由终端 GPU 管线按固定基线绘制。
+            opacity: 0;
+            single-line: true;
+            text-cursor-width: 0px;
+            color: DesignTokens.color-terminal-foreground;
             font-family: root.font-family;
             font-size: root.font-size;
+            vertical-alignment: center;
+            selection-background-color: DesignTokens.color-terminal-selection;
+            selection-foreground-color: DesignTokens.color-terminal-selection-text;
+            accessible-role: none;
+            edited => {
+                if root.terminal-active && !self.text.is-empty {
+                    root.key-input(self.text, false, false, false, false);
+                    self.text = "";
+                }
+            }
         }
 
         if !root.terminal-active : StatusBadge {
@@ -102,7 +169,7 @@ export component TerminalView inherits Rectangle {
                 root.mouse-alt = event.modifiers.alt;
                 root.mouse-control = event.modifiers.control;
                 if (event.kind == PointerEventKind.down) {
-                    terminal-focus.focus();
+                    terminal-input.focus();
                 }
                 root.mouse-input(
                     min(root.column-count - 1, max(0, floor(self.mouse-x / root.cell-width))),
@@ -167,10 +234,23 @@ export component TerminalView inherits Rectangle {
                 );
             }
         }
+
+        search-panel := SearchPanel {
+            x: parent.width - self.width - DesignTokens.space-2;
+            y: DesignTokens.space-2;
+            width: min(DesignTokens.search-panel-width, parent.width - 2 * DesignTokens.space-2);
+            visible: root.search-open;
+            query <=> root.search-query;
+            result-current: root.search-result-current;
+            result-total: root.search-result-total;
+            query-edited(query) => { root.search-query-changed(query); }
+            step(previous) => { root.search-step(previous); }
+            dismissed => { root.dismiss-search(); }
+        }
     }
 
     init => {
-        terminal-focus.focus();
+        terminal-input.focus();
         root.viewport-resized(root.column-count, root.row-count);
     }
 }

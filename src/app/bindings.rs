@@ -5,7 +5,7 @@ use super::{
     sessions::{TabManager, add_tab, close_tab, sync_tab_ui},
     settings::{AppSettings, build_profile, sync_profile_draft, sync_settings_ui, update_shortcut},
 };
-use crate::MainWindow;
+use crate::{MainWindow, terminal::TerminalController};
 use slint::{ComponentHandle, PhysicalPosition};
 use std::{
     cell::{Cell, RefCell},
@@ -72,6 +72,14 @@ pub(super) fn connect_input(
                     controller.paste_clipboard();
                 }
             }
+            Some(KeyAction::Find) => {
+                if action_tabs.borrow().active_controller().is_some()
+                    && let Some(ui) = weak_ui.upgrade()
+                {
+                    ui.set_search_open(true);
+                    ui.set_search_focus_request(ui.get_search_focus_request().wrapping_add(1));
+                }
+            }
             Some(KeyAction::Interrupt) => {
                 if let Some(controller) = action_tabs.borrow().active_controller() {
                     controller.send_key(
@@ -107,6 +115,45 @@ pub(super) fn connect_input(
             controller.send_key(input, control, alt, shift, altgr);
         }
     });
+}
+
+/// 将搜索框编辑与导航事件发送给当前活动终端。
+pub(super) fn connect_search(ui: &MainWindow, tabs: Rc<RefCell<TabManager>>) {
+    let query_tabs = tabs.clone();
+    let weak_ui = ui.as_weak();
+    ui.on_search_query_changed(move |query| {
+        if let Some(ui) = weak_ui.upgrade() {
+            ui.set_search_result_current(0);
+            ui.set_search_result_total(0);
+        }
+        if let Some(controller) = query_tabs.borrow().active_controller() {
+            controller.update_search(query.as_str().to_owned());
+        }
+    });
+
+    let step_tabs = tabs.clone();
+    ui.on_search_step(move |previous| {
+        if let Some(controller) = step_tabs.borrow().active_controller() {
+            controller.search_step(previous);
+        }
+    });
+
+    let weak_ui = ui.as_weak();
+    ui.on_dismiss_search(move || {
+        if let Some(ui) = weak_ui.upgrade() {
+            clear_search(&ui, tabs.borrow().active_controller());
+        }
+    });
+}
+
+fn clear_search(ui: &MainWindow, controller: Option<Rc<TerminalController>>) {
+    ui.set_search_open(false);
+    ui.set_search_query("".into());
+    ui.set_search_result_current(0);
+    ui.set_search_result_total(0);
+    if let Some(controller) = controller {
+        controller.update_search(String::new());
+    }
 }
 
 /// 将 Slint 的鼠标坐标与修饰键转交给活动终端。
@@ -176,7 +223,7 @@ pub(super) fn connect_resize(ui: &MainWindow, tabs: Rc<RefCell<TabManager>>) {
             return;
         }
 
-        if let Some(controller) = tabs.borrow().active_controller() {
+        if let Some(controller) = tabs.borrow().selected_controller() {
             controller.resize(columns as usize, rows as usize, cell_width, cell_height);
             if resize_suspended.replace(false) {
                 controller.request_full_redraw();
@@ -226,6 +273,7 @@ pub(super) fn connect_tabs(
         let Some(ui) = weak_ui.upgrade() else {
             return;
         };
+        clear_search(&ui, settings_tabs.borrow().active_controller());
         let mut manager = settings_tabs.borrow_mut();
         manager.settings_open = true;
         manager.settings_active = true;
@@ -241,8 +289,11 @@ pub(super) fn connect_tabs(
         };
         let mut manager = select_tabs.borrow_mut();
         if id == -1 && manager.settings_open {
+            let controller = manager.active_controller();
             manager.settings_active = true;
             sync_tab_ui(&ui, &manager);
+            drop(manager);
+            clear_search(&ui, controller);
             return;
         }
         let Some(index) = manager.sessions.iter().position(|session| session.id == id) else {
@@ -293,6 +344,12 @@ pub(super) fn connect_tabs(
             drop(manager);
             close_awaiting.set(true);
             if let Some((active_id, controller)) = active_session {
+                controller.resize(
+                    ui.get_viewport_columns().max(2) as usize,
+                    ui.get_viewport_rows().max(1) as usize,
+                    ui.get_cell_width(),
+                    ui.get_cell_height(),
+                );
                 controller.request_full_redraw();
                 ui.invoke_frame_ready(active_id);
             }
@@ -319,7 +376,7 @@ pub(super) fn connect_tabs(
         };
         sync_profile_draft(&ui, None);
         ui.set_settings_message_error(false);
-        ui.set_settings_message("填写信息后保存为新的 Shell Profile。".into());
+        ui.set_settings_message("选择本地 Shell 或 SSH，填写信息后保存新的 Profile。".into());
     });
 
     let weak_ui = ui.as_weak();
@@ -327,21 +384,37 @@ pub(super) fn connect_tabs(
     let save_fonts = mono_fonts.clone();
     let save_writable = settings_writable.clone();
     ui.on_save_profile(
-        move |id, name, program, arguments, working_directory, environment| {
+        move |id,
+              name,
+              kind_index,
+              program,
+              arguments,
+              working_directory,
+              environment,
+              ssh_host,
+              ssh_user,
+              ssh_port,
+              ssh_identity_file,
+              ssh_password| {
             let Some(ui) = weak_ui.upgrade() else {
                 return;
             };
             if !ensure_settings_writable(&ui, &save_writable) {
                 return;
             }
-            let mut settings = save_settings.borrow_mut();
             let mut profile = match build_profile(
                 id,
                 name.as_str(),
+                kind_index,
                 program.as_str(),
                 arguments.as_str(),
                 working_directory.as_str(),
                 environment.as_str(),
+                ssh_host.as_str(),
+                ssh_user.as_str(),
+                ssh_port,
+                ssh_identity_file.as_str(),
+                ssh_password.as_str(),
             ) {
                 Ok(profile) => profile,
                 Err(message) => {
@@ -350,24 +423,27 @@ pub(super) fn connect_tabs(
                     return;
                 }
             };
+            let mut candidate = save_settings.borrow().clone();
             let resolved_id = if id < 0 {
-                settings.allocate_profile_id()
+                candidate.allocate_profile_id()
             } else {
                 id
             };
             profile.id = resolved_id;
-            if let Some(existing) = settings.profile_mut(resolved_id) {
+            if let Some(existing) = candidate.profile_mut(resolved_id) {
                 *existing = profile;
             } else {
-                settings.profiles.push(profile);
+                candidate.profiles.push(profile);
             }
-            if settings.default_profile_id.is_none() {
-                settings.default_profile_id = Some(resolved_id);
+            if candidate.default_profile_id.is_none() {
+                candidate.default_profile_id = Some(resolved_id);
             }
-            match settings.save() {
+            match candidate.save() {
                 Ok(()) => {
+                    *save_settings.borrow_mut() = candidate;
+                    let settings = save_settings.borrow();
                     ui.set_settings_message_error(false);
-                    ui.set_settings_message("Shell Profile 已保存。".into());
+                    ui.set_settings_message("Profile 已保存。".into());
                     sync_settings_ui(&ui, &settings, &save_fonts);
                     sync_profile_draft(&ui, settings.profile(resolved_id));
                 }
@@ -390,13 +466,15 @@ pub(super) fn connect_tabs(
         if !ensure_settings_writable(&ui, &default_writable) {
             return;
         }
-        let mut settings = default_settings.borrow_mut();
-        if settings.profile(id).is_none() {
+        let mut candidate = default_settings.borrow().clone();
+        if candidate.profile(id).is_none() {
             return;
         }
-        settings.default_profile_id = Some(id);
-        match settings.save() {
+        candidate.default_profile_id = Some(id);
+        match candidate.save() {
             Ok(()) => {
+                *default_settings.borrow_mut() = candidate;
+                let settings = default_settings.borrow();
                 ui.set_settings_message_error(false);
                 ui.set_settings_message("默认 Profile 已更新；现有终端不会被重启。".into());
                 sync_settings_ui(&ui, &settings, &default_fonts);
@@ -419,15 +497,17 @@ pub(super) fn connect_tabs(
         if !ensure_settings_writable(&ui, &remove_writable) {
             return;
         }
-        let mut settings = remove_settings.borrow_mut();
-        settings.profiles.retain(|profile| profile.id != id);
-        if settings.default_profile_id == Some(id) {
-            settings.default_profile_id = settings.profiles.first().map(|profile| profile.id);
+        let mut candidate = remove_settings.borrow().clone();
+        candidate.profiles.retain(|profile| profile.id != id);
+        if candidate.default_profile_id == Some(id) {
+            candidate.default_profile_id = candidate.profiles.first().map(|profile| profile.id);
         }
-        match settings.save() {
+        match candidate.save() {
             Ok(()) => {
+                *remove_settings.borrow_mut() = candidate;
+                let settings = remove_settings.borrow();
                 ui.set_settings_message_error(false);
-                ui.set_settings_message("Shell Profile 已删除。".into());
+                ui.set_settings_message("Profile 已删除。".into());
                 sync_settings_ui(&ui, &settings, &remove_fonts);
                 let next_profile = settings
                     .default_profile()
@@ -457,18 +537,20 @@ pub(super) fn connect_tabs(
             ui.set_settings_message("错误：请选择有效的等宽字体".into());
             return;
         };
-        let mut settings = font_settings.borrow_mut();
-        settings.font_family = family.clone();
-        settings.font_size = size.clamp(8, 36);
-        match settings.save() {
+        let mut candidate = font_settings.borrow().clone();
+        candidate.font_family = family.clone();
+        candidate.font_size = size.clamp(8, 36);
+        match candidate.save() {
             Ok(()) => {
+                *font_settings.borrow_mut() = candidate;
+                let settings = font_settings.borrow();
                 ui.set_settings_message_error(false);
                 sync_settings_ui(&ui, &settings, &font_fonts);
                 ui.set_settings_message("字体设置已应用。".into());
                 awaiting_full_frame.set(true);
                 if let Some((active_id, controller)) = tabs
                     .borrow()
-                    .active_session()
+                    .selected_session()
                     .map(|session| (session.id, session.controller.clone()))
                 {
                     controller.resize(
@@ -498,9 +580,9 @@ pub(super) fn connect_tabs(
         if !ensure_settings_writable(&ui, &shortcut_writable) {
             return;
         }
-        let mut settings = settings.borrow_mut();
+        let mut candidate = settings.borrow().clone();
         if let Err(message) = update_shortcut(
-            &mut settings,
+            &mut candidate,
             action.as_str(),
             shortcut.as_str(),
             pass_through,
@@ -509,8 +591,10 @@ pub(super) fn connect_tabs(
             ui.set_settings_message(message.into());
             return;
         }
-        match settings.save() {
+        match candidate.save() {
             Ok(()) => {
+                *settings.borrow_mut() = candidate;
+                let settings = settings.borrow();
                 ui.set_settings_message_error(false);
                 ui.set_settings_message("快捷键设置已应用。".into());
                 sync_settings_ui(&ui, &settings, &mono_fonts);

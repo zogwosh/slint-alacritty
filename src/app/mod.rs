@@ -70,6 +70,7 @@ pub(crate) fn run() -> Result<(), Box<dyn Error>> {
     );
     bindings::connect_resize(&ui, tabs.clone());
     bindings::connect_mouse(&ui, tabs.clone());
+    bindings::connect_search(&ui, tabs.clone());
     bindings::connect_tabs(
         &ui,
         tabs.clone(),
@@ -85,6 +86,7 @@ pub(crate) fn run() -> Result<(), Box<dyn Error>> {
         renderer.clone(),
         awaiting_full_frame.clone(),
     );
+    rendering::connect_ime(&ui, renderer.clone());
 
     let _settings_timer = settings_reload::start(
         &ui,

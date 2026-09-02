@@ -3,7 +3,7 @@
 use crate::{
     MainWindow, TabData,
     app::settings::ShellProfile,
-    terminal::{FramePatch, TerminalController},
+    terminal::{FramePatch, RgbColor, TerminalController, TerminalTheme},
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use std::{
@@ -21,6 +21,8 @@ pub(super) struct TerminalSession {
     pub(super) exit_message: SharedString,
     pub(super) scroll_offset: i32,
     pub(super) scroll_history_lines: i32,
+    pub(super) cursor_column: i32,
+    pub(super) cursor_row: i32,
     pub(super) controller: Rc<TerminalController>,
 }
 
@@ -34,9 +36,19 @@ pub(super) struct TabManager {
 }
 
 impl TabManager {
+    /// 当前选中的终端会话。设置页覆盖终端时，它仍然是需要持续同步尺寸的会话。
+    pub(super) fn selected_session(&self) -> Option<&TerminalSession> {
+        self.sessions.get(self.active)
+    }
+
+    pub(super) fn selected_controller(&self) -> Option<Rc<TerminalController>> {
+        self.selected_session()
+            .map(|session| session.controller.clone())
+    }
+
     pub(super) fn active_session(&self) -> Option<&TerminalSession> {
         (!self.settings_active)
-            .then(|| self.sessions.get(self.active))
+            .then(|| self.selected_session())
             .flatten()
     }
 
@@ -65,6 +77,7 @@ pub(super) fn create_session(
         ui.get_cell_width(),
         ui.get_cell_height(),
         profile,
+        terminal_theme(ui),
         move || {
             let weak_ui = weak_ui.clone();
             let _ = slint::invoke_from_event_loop(move || {
@@ -81,8 +94,29 @@ pub(super) fn create_session(
         exit_message: SharedString::default(),
         scroll_offset: 0,
         scroll_history_lines: 0,
+        cursor_column: 0,
+        cursor_row: 0,
         controller,
     })
+}
+
+pub(super) fn terminal_theme(ui: &MainWindow) -> TerminalTheme {
+    TerminalTheme {
+        background: rgb(ui.get_terminal_background_token()),
+        foreground: rgb(ui.get_terminal_foreground_token()),
+        selection_background: rgb(ui.get_terminal_selection_token()),
+        selection_foreground: rgb(ui.get_terminal_selection_text_token()),
+        search_match_background: rgb(ui.get_terminal_search_match_token()),
+        search_current_background: rgb(ui.get_terminal_search_current_token()),
+    }
+}
+
+fn rgb(color: slint::Color) -> RgbColor {
+    RgbColor {
+        red: color.red(),
+        green: color.green(),
+        blue: color.blue(),
+    }
 }
 
 /// 将 Rust 中的标签页状态转换为 Slint 模型，并同步活动会话的元数据。
@@ -119,6 +153,8 @@ pub(super) fn sync_tab_ui(ui: &MainWindow, manager: &TabManager) {
         ui.set_exit_message(active.exit_message.clone());
         ui.set_scroll_offset(active.scroll_offset);
         ui.set_scroll_history_lines(active.scroll_history_lines);
+        ui.set_terminal_cursor_column(active.cursor_column);
+        ui.set_terminal_cursor_row(active.cursor_row);
     }
 }
 
@@ -229,9 +265,16 @@ pub(super) fn apply_frame_metadata(
     let mut changed = false;
     session.scroll_offset = frame.scroll_offset.min(i32::MAX as usize) as i32;
     session.scroll_history_lines = frame.scroll_history_lines.min(i32::MAX as usize) as i32;
+    session.cursor_column = frame.cursor.column.min(i32::MAX as usize) as i32;
+    session.cursor_row = frame.cursor.row.min(i32::MAX as usize) as i32;
     if is_active {
         ui.set_scroll_offset(session.scroll_offset);
         ui.set_scroll_history_lines(session.scroll_history_lines);
+        ui.set_terminal_cursor_column(session.cursor_column);
+        ui.set_terminal_cursor_row(session.cursor_row);
+        ui.set_search_query(frame.search.query.as_str().into());
+        ui.set_search_result_current(frame.search.current.min(i32::MAX as usize) as i32);
+        ui.set_search_result_total(frame.search.total.min(i32::MAX as usize) as i32);
     }
     if let Some(title) = &frame.title {
         session.title = title.as_str().into();

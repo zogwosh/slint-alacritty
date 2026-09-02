@@ -1,0 +1,163 @@
+import { DesignTokens } from "../design-tokens.slint";
+import { Icon, IconName } from "../icons/icon.slint";
+
+component SearchAction inherits Rectangle {
+    in property <IconName> icon;
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback activated;
+
+    width: DesignTokens.search-action-size;
+    height: DesignTokens.search-action-size;
+    border-radius: DesignTokens.radius-sm;
+    background: !root.enabled ? transparent
+        : touch.pressed ? DesignTokens.color-control-pressed
+        : touch.has-hover ? DesignTokens.color-control-hover : transparent;
+    opacity: root.enabled ? 1 : DesignTokens.disabled-opacity;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.activated(); } }
+
+    animate background { duration: DesignTokens.motion-fast; }
+
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        name: root.icon;
+        size: DesignTokens.icon-menu-chevron-size;
+        color: DesignTokens.color-icon;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.activated(); }
+    }
+}
+
+// VS Code 风格的终端悬浮搜索框，全部交互控件均由项目自有 Slint 原语组成。
+export component SearchPanel inherits Rectangle {
+    in-out property <string> query <=> search-input.text;
+    in property <int> result-current;
+    in property <int> result-total;
+    out property <bool> input-focused: search-input.has-focus;
+    callback query-edited(string);
+    callback step(bool);
+    callback dismissed;
+
+    public function focus-search() {
+        search-input.focus();
+        search-input.select-all();
+    }
+
+    height: DesignTokens.search-panel-height;
+    border-width: DesignTokens.border-width;
+    border-color: DesignTokens.color-border;
+    border-radius: DesignTokens.radius-md;
+    background: DesignTokens.color-popup;
+    clip: true;
+
+    // 吞掉控件间隙中的鼠标事件，避免点击搜索框时操作到下方终端。
+    TouchArea { }
+
+    search-focus := FocusScope {
+        width: 100%;
+        height: 100%;
+        capture-key-pressed(event) => {
+            if event.text == Key.Return {
+                root.step(event.modifiers.shift);
+                return accept;
+            }
+            if event.text == Key.Escape {
+                root.dismissed();
+                return accept;
+            }
+            if event.text == Key.F3 {
+                root.step(event.modifiers.shift);
+                return accept;
+            }
+            reject
+        }
+
+        HorizontalLayout {
+            padding: DesignTokens.space-1;
+            spacing: DesignTokens.space-0-5;
+
+            field := Rectangle {
+                min-width: DesignTokens.search-input-min-width;
+                horizontal-stretch: 1;
+                border-width: search-input.has-focus
+                    ? DesignTokens.focus-border-width : DesignTokens.border-width;
+                border-color: !root.query.is-empty && root.result-total == 0
+                    ? DesignTokens.color-warning
+                    : search-input.has-focus ? DesignTokens.color-focus-ring
+                    : DesignTokens.color-control-border;
+                border-radius: DesignTokens.radius-sm;
+                background: DesignTokens.color-input;
+                clip: true;
+
+                placeholder := Text {
+                    x: DesignTokens.control-padding-x;
+                    width: parent.width - 2 * DesignTokens.control-padding-x;
+                    height: 100%;
+                    text: root.query.is-empty && search-input.preedit-text.is-empty ? "搜索" : "";
+                    color: DesignTokens.color-text-muted;
+                    font-family: DesignTokens.font-ui;
+                    font-size: DesignTokens.text-xs;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    accessible-role: none;
+                }
+
+                search-input := TextInput {
+                    x: DesignTokens.control-padding-x;
+                    width: parent.width - 2 * DesignTokens.control-padding-x;
+                    height: 100%;
+                    single-line: true;
+                    color: DesignTokens.color-text;
+                    font-family: DesignTokens.font-ui;
+                    font-size: DesignTokens.text-xs;
+                    vertical-alignment: center;
+                    selection-background-color: DesignTokens.color-selection;
+                    selection-foreground-color: DesignTokens.color-text;
+                    accessible-role: AccessibleRole.text-input;
+                    accessible-placeholder-text: "搜索终端";
+                    edited => { root.query-edited(self.text); }
+                }
+            }
+
+            Text {
+                width: DesignTokens.search-count-width;
+                text: root.query.is-empty ? ""
+                    : root.result-total == 0 ? "无结果"
+                    : "\{root.result-current} / \{root.result-total}";
+                color: root.result-total == 0
+                    ? DesignTokens.color-warning : DesignTokens.color-text-muted;
+                font-family: DesignTokens.font-ui;
+                font-size: DesignTokens.text-xs;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+
+            SearchAction {
+                icon: IconName.chevron-up;
+                label: "上一个匹配项 (Shift+Enter)";
+                enabled: root.result-total > 0;
+                activated => { root.step(true); }
+            }
+            SearchAction {
+                icon: IconName.chevron-down;
+                label: "下一个匹配项 (Enter)";
+                enabled: root.result-total > 0;
+                activated => { root.step(false); }
+            }
+            SearchAction {
+                icon: IconName.close;
+                label: "关闭搜索 (Esc)";
+                activated => { root.dismissed(); }
+            }
+        }
+    }
+}

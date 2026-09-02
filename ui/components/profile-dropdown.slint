@@ -2,6 +2,7 @@ import { DesignTokens } from "../design-tokens.slint";
 import { Icon, IconName } from "../icons/icon.slint";
 import { ShellProfileData } from "../models.slint";
 import { IconButton } from "icon-button.slint";
+import { AppScrollView } from "scroll-view.slint";
 
 // 新建标签页按钮：左键使用默认 Profile，右键显示可选 Profile。
 export component ProfileDropdown inherits Rectangle {
@@ -52,21 +53,36 @@ export component ProfileDropdown inherits Rectangle {
             background: DesignTokens.color-surface-active;
             clip: true;
 
-            VerticalLayout {
-                padding: DesignTokens.space-2;
-                spacing: DesignTokens.space-1;
+            Text {
+                x: DesignTokens.space-2;
+                y: DesignTokens.space-2;
+                width: parent.width - 2 * DesignTokens.space-2;
+                height: root.menu-header-height;
+                text: "新建标签页";
+                color: DesignTokens.color-text-muted;
+                font-family: DesignTokens.font-ui;
+                font-size: DesignTokens.text-xs;
+                vertical-alignment: center;
+            }
 
-                Text {
-                    height: root.menu-header-height;
-                    text: "新建标签页";
-                    color: DesignTokens.color-text-muted;
-                    font-family: DesignTokens.font-ui;
-                    font-size: DesignTokens.text-xs;
-                    vertical-alignment: center;
-                }
+            profiles-scroll := AppScrollView {
+                x: DesignTokens.space-2;
+                y: DesignTokens.space-2 + root.menu-header-height + DesignTokens.space-1;
+                width: parent.width - 2 * DesignTokens.space-2;
+                height: parent.height - self.y - DesignTokens.space-2;
+                viewport-width: self.visible-width;
+                viewport-height: max(
+                    self.visible-height,
+                    max(1, root.profiles.length) * (root.menu-item-height + DesignTokens.space-1),
+                );
 
-                for profile in root.profiles : Rectangle {
-                    height: root.menu-item-height;
+                profile-list := VerticalLayout {
+                    width: parent.viewport-width;
+                    height: max(1, root.profiles.length) * (root.menu-item-height + DesignTokens.space-1);
+                    spacing: DesignTokens.space-1;
+
+                    for profile in root.profiles : Rectangle {
+                        height: root.menu-item-height;
                     border-radius: DesignTokens.radius-sm;
                     background: item-touch.pressed
                         ? DesignTokens.color-control-pressed
@@ -102,22 +118,23 @@ export component ProfileDropdown inherits Rectangle {
                         vertical-alignment: center;
                     }
 
-                    item-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            root.select-profile(profile.id);
-                            profile-menu.close();
+                        item-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.select-profile(profile.id);
+                                profile-menu.close();
+                            }
                         }
                     }
-                }
 
-                if root.profiles.length == 0 : Text {
-                    height: root.menu-item-height;
-                    text: "尚无 Profile";
-                    color: DesignTokens.color-text-muted;
-                    font-family: DesignTokens.font-ui;
-                    font-size: DesignTokens.text-xs;
-                    vertical-alignment: center;
+                    if root.profiles.length == 0 : Text {
+                        height: root.menu-item-height;
+                        text: "尚无 Profile";
+                        color: DesignTokens.color-text-muted;
+                        font-family: DesignTokens.font-ui;
+                        font-size: DesignTokens.text-xs;
+                        vertical-alignment: center;
+                    }
                 }
             }
         }
