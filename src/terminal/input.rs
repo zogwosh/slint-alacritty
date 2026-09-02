@@ -40,6 +40,11 @@ pub(super) fn encode_key(
         (control, alt)
     };
     let modifier = modifier_parameter(control, alt, shift);
+    let alt_prefix = alt
+        && matches!(
+            input,
+            KeyInput::Return | KeyInput::Backspace | KeyInput::Tab | KeyInput::Escape
+        );
     let sequence = match input {
         KeyInput::Text(text) => return encode_text(&text, control, alt),
         KeyInput::Return => "\r".into(),
@@ -61,8 +66,8 @@ pub(super) fn encode_key(
         KeyInput::Function(number) => function_sequence(number, modifier),
     };
 
-    let mut bytes = Vec::with_capacity(sequence.len() + usize::from(alt));
-    if alt && modifier.is_none() && sequence != "\x1b" {
+    let mut bytes = Vec::with_capacity(sequence.len() + usize::from(alt_prefix));
+    if alt_prefix {
         bytes.push(0x1b);
     }
     bytes.extend_from_slice(sequence.as_bytes());
@@ -198,6 +203,29 @@ mod tests {
                 TermMode::empty(),
             ),
             b"\x1bx"
+        );
+    }
+
+    #[test]
+    fn prefixes_alt_legacy_special_keys_with_escape() {
+        for (input, expected) in [
+            (KeyInput::Return, b"\x1b\r".as_slice()),
+            (KeyInput::Backspace, b"\x1b\x7f".as_slice()),
+            (KeyInput::Tab, b"\x1b\t".as_slice()),
+            (KeyInput::Escape, b"\x1b\x1b".as_slice()),
+        ] {
+            assert_eq!(
+                encode_key(input, false, true, false, false, TermMode::empty()),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn encodes_alt_cursor_keys_in_the_modifier_parameter() {
+        assert_eq!(
+            encode_key(KeyInput::Left, false, true, false, false, TermMode::empty()),
+            b"\x1b[1;3D"
         );
     }
 

@@ -2,7 +2,23 @@
 
 use super::input::KeyInput;
 use alacritty_terminal::grid::Dimensions;
-use std::sync::Arc;
+use alacritty_terminal::vte::ansi::Rgb;
+use std::sync::{Arc, Mutex};
+
+/// 高频“只关心最新值”命令的单槽状态；queued 与 value 在同一锁下避免丢失唤醒。
+pub(super) struct CoalescedCommand<T> {
+    pub(super) value: Option<T>,
+    pub(super) queued: bool,
+}
+
+impl<T> Default for CoalescedCommand<T> {
+    fn default() -> Self {
+        Self {
+            value: None,
+            queued: false,
+        }
+    }
+}
 
 /// 终端网格尺寸及每个字符单元的像素尺寸。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,15 +125,18 @@ pub(super) enum WorkerMessage {
         shift: bool,
         altgr: bool,
     },
-    Resize(TerminalSize),
+    Resize(Arc<Mutex<CoalescedCommand<TerminalSize>>>),
     PasteClipboard,
     ClipboardStore(String),
     ClipboardLoad(Arc<dyn Fn(&str) -> String + Send + Sync + 'static>),
+    ColorRequest(usize, Arc<dyn Fn(Rgb) -> String + Send + Sync + 'static>),
     Mouse(MouseInput),
     MouseScroll(MouseScrollInput),
-    ScrollTo(usize),
+    ScrollTo(Arc<Mutex<CoalescedCommand<usize>>>),
     CopySelection,
     SelectAll,
+    Search(String),
+    SearchStep(bool),
     ForceFullRedraw,
     Render,
     Shutdown,

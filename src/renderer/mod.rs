@@ -5,18 +5,21 @@ mod resources;
 mod stats;
 mod text;
 
+pub(crate) use text::measure_cell;
+
 use self::resources::{
     CellInstance, TEXTURE_FORMAT, clear_color, create_cell_pipeline, create_instance_buffer,
     create_texture,
 };
 use self::stats::PerfStats;
-use crate::terminal::FramePatch;
+use crate::terminal::{FramePatch, TerminalTheme};
 use glyphon::{
     Cache, Color as GlyphColor, ColorMode, FontSystem, Resolution, SwashCache, TextArea, TextAtlas,
     TextBounds, TextRenderer, Viewport,
 };
 use slint::wgpu_29::wgpu;
 use std::time::Instant;
+use unicode_width::UnicodeWidthStr;
 
 /// 渲染器内部保存的光标快照。
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -26,6 +29,15 @@ struct CursorState {
     visible: bool,
     shape: i32,
     blinking: bool,
+}
+
+/// IME 预编辑只保存文本和终端网格位置；字形仍走与终端正文相同的 shaping/atlas 管线。
+struct ImePreedit {
+    text: String,
+    buffers: Vec<text::TextRunBuffer>,
+    column: usize,
+    row: usize,
+    columns: usize,
 }
 
 /// 将终端帧补丁合成为一张可直接交给 Slint 显示的共享纹理。
@@ -44,10 +56,13 @@ pub(crate) struct GpuTerminalRenderer {
     cell_height: f32,
     font_size: f32,
     font_family: String,
+    /// 仅由主字体确定的行内基线；fallback 字体和行内容不得修改。
+    fixed_baseline: f32,
     /// 每个网格单元一个实例，主要承载背景、下划线和删除线。
     cell_instances: Vec<CellInstance>,
     instance_buffer: wgpu::Buffer,
     cursor_buffer: wgpu::Buffer,
+    ime_instance_buffer: wgpu::Buffer,
     viewport_buffer: wgpu::Buffer,
     viewport_bind_group: wgpu::BindGroup,
     cell_pipeline: wgpu::RenderPipeline,
@@ -56,8 +71,11 @@ pub(crate) struct GpuTerminalRenderer {
     glyph_viewport: Viewport,
     glyph_atlas: TextAtlas,
     glyph_renderer: TextRenderer,
-    /// 每个非空终端单元一个独立 Buffer，消除连续排版与网格坐标的累计误差。
-    text_cells: Vec<Option<text::CellTextBuffer>>,
+    /// ASCII 连字以连续 run 缓存；fallback/宽字符 run 保留明确的网格列锚点。
+    text_rows: Vec<Vec<text::TextRunBuffer>>,
+    /// 字体或 DPI 改变时可直接重建 shaping，无需等待 PTY 重发完整帧。
+    row_cells: Vec<Vec<crate::terminal::TerminalCellPatch>>,
+    ime_preedit: Option<ImePreedit>,
     cursor: CursorState,
     cursor_phase: bool,
     /// 下次渲染需要覆盖的行号，提交前会排序和去重。
@@ -65,6 +83,7 @@ pub(crate) struct GpuTerminalRenderer {
     clear_pending: bool,
     render_pending: bool,
     stats: PerfStats,
+    theme: TerminalTheme,
 }
 
 impl GpuTerminalRenderer {
@@ -81,6 +100,7 @@ impl GpuTerminalRenderer {
         cell_height: f32,
         font_size: f32,
         font_family: &str,
+        theme: TerminalTheme,
     ) -> Self {
         let device = device.clone();
         let queue = queue.clone();
@@ -116,6 +136,11 @@ impl GpuTerminalRenderer {
         let cell_pipeline = create_cell_pipeline(&device, &viewport_layout);
         let instance_buffer = create_instance_buffer(&device, columns.saturating_mul(rows));
         let cursor_buffer = create_instance_buffer(&device, 1);
+        let ime_instance_buffer = create_instance_buffer(&device, 1);
+
+        let mut font_system = FontSystem::new();
+        let fixed_baseline =
+            text::measure_fixed_baseline(&mut font_system, font_family, font_size, cell_height);
 
         let cache = Cache::new(&device);
         let glyph_viewport = Viewport::new(&device, &cache);
@@ -142,26 +167,31 @@ impl GpuTerminalRenderer {
             cell_height,
             font_size,
             font_family: font_family.to_owned(),
+            fixed_baseline,
             cell_instances: vec![CellInstance::default(); columns.saturating_mul(rows)],
             instance_buffer,
             cursor_buffer,
+            ime_instance_buffer,
             viewport_buffer,
             viewport_bind_group,
             cell_pipeline,
-            font_system: FontSystem::new(),
+            font_system,
             swash_cache: SwashCache::new(),
             glyph_viewport,
             glyph_atlas,
             glyph_renderer,
-            text_cells: Vec::new(),
+            text_rows: Vec::new(),
+            row_cells: Vec::new(),
+            ime_preedit: None,
             cursor: CursorState::default(),
             cursor_phase: true,
             dirty_rows: (0..rows).collect(),
             clear_pending: true,
             render_pending: true,
             stats: PerfStats::default(),
+            theme,
         };
-        renderer.rebuild_text_cells();
+        renderer.rebuild_text_rows();
         renderer.update_viewport();
         renderer
     }
@@ -204,6 +234,14 @@ impl GpuTerminalRenderer {
             (self.texture, self.texture_view) = create_texture(&self.device, width, height);
             self.clear_pending = true;
         }
+        if metrics_changed || font_changed {
+            self.fixed_baseline = text::measure_fixed_baseline(
+                &mut self.font_system,
+                &self.font_family,
+                self.font_size,
+                self.cell_height,
+            );
+        }
         if metrics_changed {
             self.update_instance_metrics(previous_cell_width);
             self.upload_all_instances();
@@ -211,6 +249,12 @@ impl GpuTerminalRenderer {
         }
         if texture_changed || metrics_changed {
             self.update_row_metrics();
+        }
+        if font_changed {
+            self.rebuild_all_text_rows();
+            if let Some(value) = self.ime_preedit.as_ref().map(|ime| ime.text.clone()) {
+                self.set_ime_preedit(&value);
+            }
         }
         if texture_changed || metrics_changed || font_changed {
             self.dirty_rows = (0..self.rows).collect();
@@ -245,15 +289,19 @@ impl GpuTerminalRenderer {
             .sum::<usize>();
         let mut uploaded_bytes = 0;
         let mut text_spans = 0;
+        let mut text_dirty_rows = vec![false; self.rows];
 
         for row in &frame.changed_rows {
-            if row.row >= self.rows {
+            let start_column = row.start_column.min(self.columns);
+            let end_column = row.end_column.min(self.columns);
+            if row.row >= self.rows || start_column >= end_column {
                 continue;
             }
-            self.update_cell_row(row.row, &row.cells);
-            text_spans += self.update_text_row(row.row, &row.cells);
-            let start = row.row * self.columns;
-            let end = start + self.columns;
+            self.update_cell_range(row.row, start_column, end_column, &row.cells);
+            self.merge_row_cells(row.row, start_column, end_column, &row.cells);
+            text_dirty_rows[row.row] = true;
+            let start = row.row * self.columns + start_column;
+            let end = row.row * self.columns + end_column;
             let bytes = bytemuck::cast_slice(&self.cell_instances[start..end]);
             self.queue.write_buffer(
                 &self.instance_buffer,
@@ -262,6 +310,12 @@ impl GpuTerminalRenderer {
             );
             uploaded_bytes += bytes.len();
             self.dirty_rows.push(row.row);
+        }
+        for (row, dirty) in text_dirty_rows.into_iter().enumerate() {
+            if dirty {
+                let cells = self.row_cells[row].clone();
+                text_spans += self.update_text_row(row, &cells);
+            }
         }
 
         let previous_cursor = self.cursor;
@@ -283,6 +337,7 @@ impl GpuTerminalRenderer {
         }
         self.cursor = next_cursor;
         self.update_cursor_buffer();
+        self.relocate_ime_to_cursor();
         self.render_pending = true;
         self.stats.record_apply(
             frame.full_redraw_reason,
@@ -321,30 +376,63 @@ impl GpuTerminalRenderer {
             },
         );
 
-        // 只提交脏行中的非空单元；每个 TextArea 的 left 来自精确网格列坐标。
+        // 正文与 IME 都使用固定终端基线；每个 TextArea 只允许在自己的网格行内绘制。
         let mut text_areas = Vec::new();
         for &row in &dirty_rows {
-            let start = row.saturating_mul(self.columns);
-            let end = start
-                .saturating_add(self.columns)
-                .min(self.text_cells.len());
-            for (column, cell) in self.text_cells[start..end].iter().enumerate() {
-                if let Some(cell) = cell {
-                    text_areas.push(TextArea {
-                        buffer: &cell.buffer,
-                        left: column as f32 * self.cell_width,
-                        top: row as f32 * self.cell_height,
-                        scale: 1.0,
-                        bounds: TextBounds {
-                            left: 0,
-                            top: 0,
-                            right: self.width as i32,
-                            bottom: self.height as i32,
-                        },
-                        default_color: GlyphColor::rgb(230, 237, 243),
-                        custom_glyphs: &[],
-                    });
-                }
+            let row_top = row as f32 * self.cell_height;
+            for text_run in self.text_rows.get(row).into_iter().flatten() {
+                text_areas.push(TextArea {
+                    buffer: &text_run.buffer,
+                    left: text_run.column() as f32 * self.cell_width + text_run.x_offset(),
+                    top: text::baseline_aligned_top(
+                        row_top,
+                        self.fixed_baseline,
+                        text_run.baseline(),
+                    ),
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: row_top.floor().max(0.0) as i32,
+                        right: self.width as i32,
+                        bottom: (row_top + self.cell_height).ceil().min(self.height as f32) as i32,
+                    },
+                    default_color: GlyphColor::rgb(
+                        self.theme.foreground.red,
+                        self.theme.foreground.green,
+                        self.theme.foreground.blue,
+                    ),
+                    custom_glyphs: &[],
+                });
+            }
+        }
+        if let Some(ime) = &self.ime_preedit
+            && dirty_rows.binary_search(&ime.row).is_ok()
+        {
+            let row_top = ime.row as f32 * self.cell_height;
+            for text_run in &ime.buffers {
+                text_areas.push(TextArea {
+                    buffer: &text_run.buffer,
+                    left: (ime.column + text_run.column()) as f32 * self.cell_width
+                        + text_run.x_offset(),
+                    top: text::baseline_aligned_top(
+                        row_top,
+                        self.fixed_baseline,
+                        text_run.baseline(),
+                    ),
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: (ime.column as f32 * self.cell_width).floor().max(0.0) as i32,
+                        top: row_top.floor().max(0.0) as i32,
+                        right: self.width as i32,
+                        bottom: (row_top + self.cell_height).ceil().min(self.height as f32) as i32,
+                    },
+                    default_color: GlyphColor::rgb(
+                        self.theme.foreground.red,
+                        self.theme.foreground.green,
+                        self.theme.foreground.blue,
+                    ),
+                    custom_glyphs: &[],
+                });
             }
         }
         if let Err(error) = self.glyph_renderer.prepare(
@@ -375,7 +463,7 @@ impl GpuTerminalRenderer {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: if self.clear_pending {
-                            wgpu::LoadOp::Clear(clear_color())
+                            wgpu::LoadOp::Clear(clear_color(self.theme.background))
                         } else {
                             wgpu::LoadOp::Load
                         },
@@ -394,6 +482,12 @@ impl GpuTerminalRenderer {
                 let first = row.saturating_mul(self.columns) as u32;
                 let end = first.saturating_add(self.columns as u32);
                 pass.draw(0..6, first..end);
+            }
+            if let Some(ime) = &self.ime_preedit
+                && dirty_rows.binary_search(&ime.row).is_ok()
+            {
+                pass.set_vertex_buffer(0, self.ime_instance_buffer.slice(..));
+                pass.draw(0..6, 0..1);
             }
             if let Err(error) =
                 self.glyph_renderer
@@ -426,16 +520,106 @@ impl GpuTerminalRenderer {
         self.render_pending = true;
         true
     }
+
+    /// 更新输入法预编辑文本；空字符串会恢复该行的正常终端内容。
+    pub(crate) fn set_ime_preedit(&mut self, value: &str) -> bool {
+        let previous_row = self.ime_preedit.as_ref().map(|ime| ime.row);
+        if value.is_empty() || !self.cursor.visible || self.cursor.row >= self.rows {
+            self.ime_preedit = None;
+            self.queue.write_buffer(
+                &self.ime_instance_buffer,
+                0,
+                bytemuck::bytes_of(&CellInstance::default()),
+            );
+            if let Some(row) = previous_row {
+                self.dirty_rows.push(row);
+                self.render_pending = true;
+            }
+            return previous_row.is_some();
+        }
+
+        let column = self.cursor.column.min(self.columns.saturating_sub(1));
+        let row = self.cursor.row;
+        let available_columns = self.columns.saturating_sub(column).max(1);
+        let metrics = glyphon::Metrics::new(self.font_size, self.cell_height);
+        let grid = text::GridTextMetrics::new(
+            metrics,
+            self.cell_width,
+            self.cell_height,
+            &self.font_family,
+        );
+        let (buffers, columns) = text::create_preedit_buffers(
+            &mut self.font_system,
+            grid,
+            available_columns,
+            value,
+            self.theme.foreground,
+        );
+        if buffers.is_empty() {
+            return false;
+        }
+        self.ime_preedit = Some(ImePreedit {
+            text: value.to_owned(),
+            buffers,
+            column,
+            row,
+            columns,
+        });
+        if let Some(previous_row) = previous_row {
+            self.dirty_rows.push(previous_row);
+        }
+        self.dirty_rows.push(row);
+        self.update_ime_buffer();
+        self.render_pending = true;
+        true
+    }
+
+    fn relocate_ime_to_cursor(&mut self) {
+        let Some(ime) = self.ime_preedit.as_mut() else {
+            return;
+        };
+        let previous_row = ime.row;
+        ime.column = self.cursor.column.min(self.columns.saturating_sub(1));
+        ime.row = self.cursor.row.min(self.rows.saturating_sub(1));
+        ime.columns = UnicodeWidthStr::width(ime.text.as_str())
+            .max(1)
+            .min(self.columns.saturating_sub(ime.column).max(1));
+        self.dirty_rows.push(previous_row);
+        self.dirty_rows.push(ime.row);
+        self.update_ime_buffer();
+    }
+
+    fn update_ime_buffer(&self) {
+        let instance = self
+            .ime_preedit
+            .as_ref()
+            .map_or_else(CellInstance::default, |ime| CellInstance {
+                rect: [
+                    ime.column as f32 * self.cell_width,
+                    ime.row as f32 * self.cell_height,
+                    ime.columns as f32 * self.cell_width,
+                    self.cell_height,
+                ],
+                background: resources::rgba(self.theme.background, 0.0),
+                foreground: resources::rgba(self.theme.foreground, 1.0),
+                flags: [1, 0, 0, 0],
+            });
+        self.queue
+            .write_buffer(&self.ime_instance_buffer, 0, bytemuck::bytes_of(&instance));
+    }
 }
 
 /// 判断完整帧是否按顺序覆盖了当前网格的每一行。
 fn frame_is_complete(frame: &FramePatch) -> bool {
-    frame.changed_rows.len() == frame.rows
+    frame.changed_rows.len() >= frame.rows
         && frame
             .changed_rows
             .iter()
+            .take(frame.rows)
             .enumerate()
-            .all(|(row, patch)| patch.row == row)
+            .all(|(row, patch)| {
+                patch.row == row && patch.start_column == 0 && patch.end_column == frame.columns
+            })
 }
 
 #[cfg(test)]
@@ -453,12 +637,15 @@ mod tests {
             changed_rows: (0..rows)
                 .map(|row| RowPatch {
                     row,
+                    start_column: 0,
+                    end_column: 80,
                     cells: Vec::new(),
                 })
                 .collect(),
             cursor: CursorPatch::default(),
             scroll_offset: 0,
             scroll_history_lines: 0,
+            search: crate::terminal::SearchSnapshot::default(),
             title: None,
             exit_message: None,
         }

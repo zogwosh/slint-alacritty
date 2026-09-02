@@ -21,18 +21,16 @@ pub(super) fn visible_point<T: EventListener>(
     )
 }
 
-/// 将连续滚轮量转换为有限的整数行数，并保留不足一行的滚动方向。
-pub(super) fn scroll_lines(lines: f32) -> i32 {
+/// 累计高精度滚轮输入，只在跨过完整字符行时产生滚动。
+pub(super) fn accumulate_scroll_lines(remainder: &mut f32, lines: f32) -> i32 {
     if !lines.is_finite() || lines == 0.0 {
         return 0;
     }
 
-    let rounded = lines.round() as i32;
-    if rounded == 0 {
-        lines.signum() as i32
-    } else {
-        rounded.clamp(-20, 20)
-    }
+    let accumulated = (*remainder + lines).clamp(-20.0, 20.0);
+    let whole_lines = accumulated.trunc() as i32;
+    *remainder = accumulated - whole_lines as f32;
+    whole_lines
 }
 
 /// 按当前终端模式生成 SGR、UTF-8 或传统 X10 鼠标报告。
@@ -113,7 +111,7 @@ pub(super) fn encode_mouse_button_code(
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_mouse_report, scroll_lines};
+    use super::{accumulate_scroll_lines, encode_mouse_report};
     use crate::terminal::command::{MouseAction, MouseButton};
     use alacritty_terminal::term::TermMode;
 
@@ -179,10 +177,15 @@ mod tests {
     }
 
     #[test]
-    fn wheel_delta_is_never_lost_and_is_bounded() {
-        assert_eq!(scroll_lines(0.2), 1);
-        assert_eq!(scroll_lines(-0.2), -1);
-        assert_eq!(scroll_lines(50.0), 20);
-        assert_eq!(scroll_lines(f32::NAN), 0);
+    fn wheel_delta_accumulates_until_a_whole_line_and_is_bounded() {
+        let mut remainder = 0.0;
+        assert_eq!(accumulate_scroll_lines(&mut remainder, 0.2), 0);
+        assert_eq!(accumulate_scroll_lines(&mut remainder, 0.7), 0);
+        assert_eq!(accumulate_scroll_lines(&mut remainder, 0.2), 1);
+        assert!((remainder - 0.1).abs() < f32::EPSILON * 4.0);
+        assert_eq!(accumulate_scroll_lines(&mut remainder, -0.4), 0);
+        assert_eq!(accumulate_scroll_lines(&mut remainder, -0.8), -1);
+        assert_eq!(accumulate_scroll_lines(&mut remainder, 50.0), 20);
+        assert_eq!(accumulate_scroll_lines(&mut remainder, f32::NAN), 0);
     }
 }

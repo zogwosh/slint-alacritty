@@ -1,10 +1,12 @@
 use super::{
     backend::TerminalBackend,
     command::{
-        MouseAction, MouseButton, MouseInput, MouseScrollInput, TerminalSize, WorkerMessage,
+        CoalescedCommand, MouseAction, MouseButton, MouseInput, MouseScrollInput, TerminalSize,
+        WorkerMessage,
     },
     frame::FramePatch,
     input::KeyInput,
+    palette::TerminalTheme,
     worker::run_worker,
 };
 use crate::app::settings::ShellProfile;
@@ -13,7 +15,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc,
+        mpsc::{self, SyncSender, TrySendError},
     },
     thread::{self, JoinHandle},
 };
@@ -21,11 +23,13 @@ use std::{
 /// UI 层控制终端运行时的线程安全门面。
 pub(crate) struct TerminalController {
     /// 所有输入和控制操作都通过该发送端交给工作线程。
-    worker_sender: mpsc::Sender<WorkerMessage>,
+    worker_sender: SyncSender<WorkerMessage>,
     /// 单槽帧邮箱：UI 来不及消费时，工作线程会合并兼容的增量帧。
     latest_frame: Arc<Mutex<Option<FramePatch>>>,
     /// 防止同一批未消费帧重复唤醒 Slint 事件循环。
     notification_pending: Arc<AtomicBool>,
+    pending_resize: Arc<Mutex<CoalescedCommand<TerminalSize>>>,
+    pending_scroll: Arc<Mutex<CoalescedCommand<usize>>>,
     worker_thread: Option<JoinHandle<()>>,
 }
 
@@ -37,9 +41,11 @@ impl TerminalController {
         cell_width: f32,
         cell_height: f32,
         profile: Option<&ShellProfile>,
+        theme: TerminalTheme,
         frame_notifier: impl Fn() + Send + Sync + 'static,
     ) -> io::Result<Self> {
-        let (worker_sender, worker_receiver) = mpsc::channel();
+        // 有界队列为 UI/PTY 突发流量提供背压；可合并命令不会按事件数增长。
+        let (worker_sender, worker_receiver) = mpsc::sync_channel(512);
         let backend = TerminalBackend::new(
             columns,
             rows,
@@ -47,6 +53,7 @@ impl TerminalController {
             cell_height,
             worker_sender.clone(),
             profile,
+            theme,
         )?;
         let latest_frame = Arc::new(Mutex::new(None));
         let worker_frame = latest_frame.clone();
@@ -62,11 +69,15 @@ impl TerminalController {
                 frame_notifier,
             )
         });
+        let pending_resize = Arc::new(Mutex::new(CoalescedCommand::default()));
+        let pending_scroll = Arc::new(Mutex::new(CoalescedCommand::default()));
 
         Ok(Self {
             worker_sender,
             latest_frame,
             notification_pending,
+            pending_resize,
+            pending_scroll,
             worker_thread: Some(worker_thread),
         })
     }
@@ -100,6 +111,14 @@ impl TerminalController {
         let _ = self.worker_sender.send(WorkerMessage::SelectAll);
     }
 
+    pub(crate) fn update_search(&self, query: String) {
+        let _ = self.worker_sender.send(WorkerMessage::Search(query));
+    }
+
+    pub(crate) fn search_step(&self, previous: bool) {
+        let _ = self.worker_sender.send(WorkerMessage::SearchStep(previous));
+    }
+
     pub(crate) fn request_full_redraw(&self) {
         let _ = self.worker_sender.send(WorkerMessage::ForceFullRedraw);
     }
@@ -130,7 +149,7 @@ impl TerminalController {
             4 => MouseAction::DoubleClick,
             _ => MouseAction::Cancel,
         };
-        let _ = self.worker_sender.send(WorkerMessage::Mouse(MouseInput {
+        let message = WorkerMessage::Mouse(MouseInput {
             column,
             row,
             button,
@@ -139,7 +158,15 @@ impl TerminalController {
             alt,
             control,
             right_half,
-        }));
+        });
+        if action == MouseAction::Move {
+            // 指针移动可由后续位置取代，绝不能让它阻塞 UI 事件循环。
+            match self.worker_sender.try_send(message) {
+                Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
+            }
+        } else {
+            let _ = self.worker_sender.send(message);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -165,20 +192,31 @@ impl TerminalController {
     }
 
     pub(crate) fn resize(&self, columns: usize, rows: usize, cell_width: f32, cell_height: f32) {
-        let _ = self
-            .worker_sender
-            .send(WorkerMessage::Resize(TerminalSize::new(
-                columns,
-                rows,
-                cell_width,
-                cell_height,
-            )));
+        let mut pending = self
+            .pending_resize
+            .lock()
+            .expect("pending resize mutex poisoned");
+        pending.value = Some(TerminalSize::new(columns, rows, cell_width, cell_height));
+        if !pending.queued {
+            pending.queued = true;
+            let command = self.pending_resize.clone();
+            drop(pending);
+            let _ = self.worker_sender.send(WorkerMessage::Resize(command));
+        }
     }
 
     pub(crate) fn scroll_to(&self, display_offset: usize) {
-        let _ = self
-            .worker_sender
-            .send(WorkerMessage::ScrollTo(display_offset));
+        let mut pending = self
+            .pending_scroll
+            .lock()
+            .expect("pending scroll mutex poisoned");
+        pending.value = Some(display_offset);
+        if !pending.queued {
+            pending.queued = true;
+            let command = self.pending_scroll.clone();
+            drop(pending);
+            let _ = self.worker_sender.send(WorkerMessage::ScrollTo(command));
+        }
     }
 
     /// 取走最近一帧，并允许工作线程再次发送 UI 唤醒通知。

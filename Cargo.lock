@@ -4780,6 +4780,8 @@ dependencies = [
  "slint",
  "slint-build",
  "toml",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]

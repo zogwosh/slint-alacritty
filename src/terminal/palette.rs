@@ -1,7 +1,7 @@
 //! 将 ANSI 命名色、索引色和应用动态覆盖统一解析为 RGB。
 
 use alacritty_terminal::{
-    term::color::Colors,
+    term::color::{COUNT, Colors},
     vte::ansi::{Color as AnsiColor, NamedColor, Rgb},
 };
 
@@ -11,6 +11,41 @@ pub(crate) struct RgbColor {
     pub(crate) red: u8,
     pub(crate) green: u8,
     pub(crate) blue: u8,
+}
+
+/// 解析终端动态颜色查询使用的索引；覆盖色与默认主题的优先级和实际渲染一致。
+pub(super) fn resolve_dynamic_color(
+    index: usize,
+    overrides: &Colors,
+    theme: TerminalTheme,
+) -> Option<Rgb> {
+    if index >= COUNT {
+        return None;
+    }
+    if let Some(color) = overrides[index] {
+        return Some(color);
+    }
+
+    Some(match index {
+        0..=255 => indexed_color(index as u8),
+        256 | 267 => rgb(theme.foreground),
+        257 => rgb(theme.background),
+        258 => rgb(theme.foreground),
+        259..=266 => dim(ANSI_PALETTE[index - 259]),
+        268 => dim(rgb(theme.foreground)),
+        _ => return None,
+    })
+}
+
+/// 从 UI DesignTokens 注入的终端基础主题；终端程序仍可通过 ANSI 动态覆盖单元颜色。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalTheme {
+    pub(crate) background: RgbColor,
+    pub(crate) foreground: RgbColor,
+    pub(crate) selection_background: RgbColor,
+    pub(crate) selection_foreground: RgbColor,
+    pub(crate) search_match_background: RgbColor,
+    pub(crate) search_current_background: RgbColor,
 }
 
 /// 应用默认的 16 色 ANSI 调色板。
@@ -98,12 +133,17 @@ const ANSI_PALETTE: [Rgb; 16] = [
 ];
 
 /// 优先采用终端应用设置的动态颜色，否则回退到内置调色板。
-pub(super) fn resolve_color(color: AnsiColor, overrides: &Colors, foreground: bool) -> RgbColor {
+pub(super) fn resolve_color(
+    color: AnsiColor,
+    overrides: &Colors,
+    foreground: bool,
+    theme: TerminalTheme,
+) -> RgbColor {
     let rgb = match color {
         AnsiColor::Spec(rgb) => rgb,
         AnsiColor::Indexed(index) => indexed_color(index),
         AnsiColor::Named(named) => {
-            overrides[named].unwrap_or_else(|| named_color(named, foreground))
+            overrides[named].unwrap_or_else(|| named_color(named, foreground, theme))
         }
     };
     RgbColor {
@@ -113,28 +153,12 @@ pub(super) fn resolve_color(color: AnsiColor, overrides: &Colors, foreground: bo
     }
 }
 
-fn named_color(color: NamedColor, foreground: bool) -> Rgb {
+fn named_color(color: NamedColor, foreground: bool, theme: TerminalTheme) -> Rgb {
     match color {
-        NamedColor::Foreground | NamedColor::BrightForeground => Rgb {
-            r: 0xe6,
-            g: 0xed,
-            b: 0xf3,
-        },
-        NamedColor::Background => Rgb {
-            r: 0x0d,
-            g: 0x11,
-            b: 0x17,
-        },
-        NamedColor::Cursor => Rgb {
-            r: 0xe6,
-            g: 0xed,
-            b: 0xf3,
-        },
-        NamedColor::DimForeground => Rgb {
-            r: 0x7d,
-            g: 0x85,
-            b: 0x90,
-        },
+        NamedColor::Foreground | NamedColor::BrightForeground => rgb(theme.foreground),
+        NamedColor::Background => rgb(theme.background),
+        NamedColor::Cursor => rgb(theme.foreground),
+        NamedColor::DimForeground => dim(rgb(theme.foreground)),
         NamedColor::DimBlack => dim(ANSI_PALETTE[0]),
         NamedColor::DimRed => dim(ANSI_PALETTE[1]),
         NamedColor::DimGreen => dim(ANSI_PALETTE[2]),
@@ -147,18 +171,18 @@ fn named_color(color: NamedColor, foreground: bool) -> Rgb {
             .get(named as usize)
             .copied()
             .unwrap_or(if foreground {
-                Rgb {
-                    r: 0xe6,
-                    g: 0xed,
-                    b: 0xf3,
-                }
+                rgb(theme.foreground)
             } else {
-                Rgb {
-                    r: 0x0d,
-                    g: 0x11,
-                    b: 0x17,
-                }
+                rgb(theme.background)
             }),
+    }
+}
+
+fn rgb(color: RgbColor) -> Rgb {
+    Rgb {
+        r: color.red,
+        g: color.green,
+        b: color.blue,
     }
 }
 
@@ -194,7 +218,7 @@ fn dim(color: Rgb) -> Rgb {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_color;
+    use super::{RgbColor, TerminalTheme, resolve_color, resolve_dynamic_color};
     use alacritty_terminal::{
         term::color::Colors,
         vte::ansi::{Color, NamedColor},
@@ -202,7 +226,95 @@ mod tests {
 
     #[test]
     fn bright_dim_colors_do_not_overflow() {
-        let color = resolve_color(Color::Named(NamedColor::DimRed), &Colors::default(), true);
+        let color = resolve_color(
+            Color::Named(NamedColor::DimRed),
+            &Colors::default(),
+            true,
+            TerminalTheme {
+                background: RgbColor {
+                    red: 1,
+                    green: 2,
+                    blue: 3,
+                },
+                foreground: RgbColor {
+                    red: 4,
+                    green: 5,
+                    blue: 6,
+                },
+                selection_background: RgbColor {
+                    red: 7,
+                    green: 8,
+                    blue: 9,
+                },
+                selection_foreground: RgbColor {
+                    red: 10,
+                    green: 11,
+                    blue: 12,
+                },
+                search_match_background: RgbColor {
+                    red: 13,
+                    green: 14,
+                    blue: 15,
+                },
+                search_current_background: RgbColor {
+                    red: 19,
+                    green: 20,
+                    blue: 21,
+                },
+            },
+        );
         assert_eq!((color.red, color.green, color.blue), (170, 82, 76));
+    }
+
+    #[test]
+    fn dynamic_queries_use_overrides_then_theme_defaults() {
+        let theme = TerminalTheme {
+            background: RgbColor {
+                red: 1,
+                green: 2,
+                blue: 3,
+            },
+            foreground: RgbColor {
+                red: 4,
+                green: 5,
+                blue: 6,
+            },
+            selection_background: RgbColor {
+                red: 7,
+                green: 8,
+                blue: 9,
+            },
+            selection_foreground: RgbColor {
+                red: 10,
+                green: 11,
+                blue: 12,
+            },
+            search_match_background: RgbColor {
+                red: 13,
+                green: 14,
+                blue: 15,
+            },
+            search_current_background: RgbColor {
+                red: 19,
+                green: 20,
+                blue: 21,
+            },
+        };
+        let mut colors = Colors::default();
+        colors[NamedColor::Foreground] = Some(alacritty_terminal::vte::ansi::Rgb {
+            r: 20,
+            g: 21,
+            b: 22,
+        });
+
+        assert_eq!(
+            resolve_dynamic_color(NamedColor::Foreground as usize, &colors, theme),
+            colors[NamedColor::Foreground]
+        );
+        assert_eq!(
+            resolve_dynamic_color(NamedColor::Background as usize, &colors, theme),
+            Some(alacritty_terminal::vte::ansi::Rgb { r: 1, g: 2, b: 3 })
+        );
+        assert!(resolve_dynamic_color(usize::MAX, &colors, theme).is_none());
     }
 }

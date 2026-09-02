@@ -43,6 +43,10 @@ pub(super) fn run_worker(
             }
         };
 
+        // 即使 PTY 的 Render 唤醒因队列已满而被合并，消费任一命令也会检查 dirty 状态。
+        if message.is_some() {
+            frame_pending = true;
+        }
         match message {
             Some(WorkerMessage::Input {
                 input,
@@ -51,9 +55,16 @@ pub(super) fn run_worker(
                 shift,
                 altgr,
             }) => backend.send_key(input, control, alt, shift, altgr),
-            Some(WorkerMessage::Resize(size)) => {
-                backend.resize(size);
-                frame_pending = true;
+            Some(WorkerMessage::Resize(command)) => {
+                let size = {
+                    let mut command = command.lock().expect("pending resize mutex poisoned");
+                    command.queued = false;
+                    command.value.take()
+                };
+                if let Some(size) = size {
+                    backend.resize(size);
+                    frame_pending = true;
+                }
             }
             Some(WorkerMessage::PasteClipboard) => {
                 if let Some(text) = clipboard
@@ -77,9 +88,22 @@ pub(super) fn run_worker(
                     backend.send_to_pty(formatter(&text));
                 }
             }
+            Some(WorkerMessage::ColorRequest(index, formatter)) => {
+                backend.respond_color_request(index, formatter);
+            }
             Some(WorkerMessage::Mouse(input)) => backend.mouse_input(input),
             Some(WorkerMessage::MouseScroll(input)) => backend.mouse_scroll(input),
-            Some(WorkerMessage::ScrollTo(display_offset)) => backend.scroll_to(display_offset),
+            Some(WorkerMessage::ScrollTo(command)) => {
+                let display_offset = {
+                    let mut command = command.lock().expect("pending scroll mutex poisoned");
+                    command.queued = false;
+                    command.value.take()
+                };
+                if let Some(display_offset) = display_offset {
+                    backend.scroll_to(display_offset);
+                    frame_pending = true;
+                }
+            }
             Some(WorkerMessage::CopySelection) => {
                 if let Some(text) = backend.selected_text().filter(|text| !text.is_empty())
                     && let Some(clipboard) = &mut clipboard
@@ -88,6 +112,14 @@ pub(super) fn run_worker(
                 }
             }
             Some(WorkerMessage::SelectAll) => backend.select_all(),
+            Some(WorkerMessage::Search(query)) => {
+                backend.update_search(query);
+                frame_pending = true;
+            }
+            Some(WorkerMessage::SearchStep(previous)) => {
+                backend.search_step(previous);
+                frame_pending = true;
+            }
             Some(WorkerMessage::ForceFullRedraw) => {
                 backend.request_full_redraw();
                 frame_pending = true;
@@ -110,7 +142,7 @@ pub(super) fn run_worker(
     }
 }
 
-/// 把新帧写入单槽邮箱；同一世代和尺寸的未消费增量帧按行合并。
+/// 把新帧写入单槽邮箱；列补丁保持捕获顺序，避免同一行的独立区间互相覆盖。
 fn publish_frame(latest_frame: &Mutex<Option<FramePatch>>, mut incoming: FramePatch) {
     let mut slot = latest_frame.lock().expect("latest frame mutex poisoned");
     let Some(mut pending) = slot.take() else {
@@ -122,30 +154,17 @@ fn publish_frame(latest_frame: &Mutex<Option<FramePatch>>, mut incoming: FramePa
     if pending.generation != incoming.generation
         || pending.columns != incoming.columns
         || pending.rows != incoming.rows
+        || incoming.full_redraw
     {
         *slot = Some(incoming);
         return;
     }
 
-    for row in incoming.changed_rows.drain(..) {
-        if let Some(existing) = pending
-            .changed_rows
-            .iter_mut()
-            .find(|existing| existing.row == row.row)
-        {
-            *existing = row;
-        } else {
-            pending.changed_rows.push(row);
-        }
-    }
-    pending.changed_rows.sort_unstable_by_key(|row| row.row);
-    pending.full_redraw |= incoming.full_redraw;
-    if incoming.full_redraw_reason.is_some() {
-        pending.full_redraw_reason = incoming.full_redraw_reason;
-    }
+    pending.changed_rows.append(&mut incoming.changed_rows);
     pending.cursor = incoming.cursor;
     pending.scroll_offset = incoming.scroll_offset;
     pending.scroll_history_lines = incoming.scroll_history_lines;
+    pending.search = incoming.search;
     if incoming.title.is_some() {
         pending.title = incoming.title;
     }
@@ -172,19 +191,22 @@ mod tests {
                 .iter()
                 .map(|row| RowPatch {
                     row: *row,
+                    start_column: 0,
+                    end_column: 80,
                     cells: Vec::new(),
                 })
                 .collect(),
             cursor: CursorPatch::default(),
             scroll_offset: 0,
             scroll_history_lines: 0,
+            search: crate::terminal::SearchSnapshot::default(),
             title: None,
             exit_message: None,
         }
     }
 
     #[test]
-    fn mailbox_merges_unconsumed_incremental_rows() {
+    fn mailbox_preserves_incremental_patch_order() {
         let slot = Mutex::new(None);
         publish_frame(&slot, frame(0, &[1, 3]));
         publish_frame(&slot, frame(0, &[2, 3]));
@@ -195,7 +217,7 @@ mod tests {
             .iter()
             .map(|row| row.row)
             .collect::<Vec<_>>();
-        assert_eq!(rows, vec![1, 2, 3]);
+        assert_eq!(rows, vec![1, 3, 2, 3]);
     }
 
     #[test]
@@ -261,5 +283,26 @@ mod tests {
         let frame = slot.lock().unwrap().take().unwrap();
         assert_eq!(frame.scroll_offset, 17);
         assert_eq!(frame.scroll_history_lines, 64);
+    }
+
+    #[test]
+    fn mailbox_retains_latest_search_state() {
+        let slot = Mutex::new(None);
+        let mut first = frame(0, &[1]);
+        first.search.query = "old".to_owned();
+        first.search.current = 1;
+        first.search.total = 2;
+        publish_frame(&slot, first);
+
+        let mut latest = frame(0, &[2]);
+        latest.search.query = "cargo".to_owned();
+        latest.search.current = 3;
+        latest.search.total = 12;
+        publish_frame(&slot, latest);
+
+        let frame = slot.lock().unwrap().take().unwrap();
+        assert_eq!(frame.search.query, "cargo");
+        assert_eq!(frame.search.current, 3);
+        assert_eq!(frame.search.total, 12);
     }
 }

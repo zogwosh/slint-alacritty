@@ -8,10 +8,15 @@ use super::{
     },
     frame::{FramePatch, capture_frame},
     input::{KeyInput, encode_key},
-    mouse::{encode_mouse_button_code, encode_mouse_report, scroll_lines, visible_point},
+    mouse::{
+        accumulate_scroll_lines, encode_mouse_button_code, encode_mouse_report, visible_point,
+    },
     notifier::Notifier,
+    palette::{TerminalTheme, resolve_dynamic_color},
+    search::SearchState,
+    ssh::configure_askpass,
 };
-use crate::app::settings::ShellProfile;
+use crate::app::settings::{ProfileKind, ShellProfile};
 use alacritty_terminal::{
     event::{EventListener, WindowSize},
     event_loop::{EventLoop, EventLoopSender, Msg},
@@ -25,7 +30,7 @@ use alacritty_terminal::{
 use std::{
     borrow::Cow,
     io,
-    sync::{Arc, mpsc::Sender},
+    sync::{Arc, mpsc::SyncSender},
     thread::JoinHandle,
 };
 
@@ -50,6 +55,9 @@ pub(super) struct TerminalBackend {
     forced_full_redraw: Option<super::frame::FullRedrawReason>,
     /// 上一帧已绘制的选择区，用于额外标记取消高亮的旧行。
     rendered_selection: SelectionSnapshot,
+    scroll_remainder: f32,
+    search: SearchState,
+    theme: TerminalTheme,
 }
 
 /// 只保留判断选择区绘制变化所需的数据。
@@ -66,8 +74,9 @@ impl TerminalBackend {
         rows: usize,
         cell_width: f32,
         cell_height: f32,
-        worker_sender: Sender<WorkerMessage>,
+        worker_sender: SyncSender<WorkerMessage>,
         profile: Option<&ShellProfile>,
+        theme: TerminalTheme,
     ) -> io::Result<Self> {
         let size = TerminalSize::new(columns, rows, cell_width, cell_height);
         let window_size = window_size(size);
@@ -78,15 +87,22 @@ impl TerminalBackend {
             notifier.clone(),
         )));
 
-        tty::setup_env();
         let mut options = Options::default();
         if let Some(profile) = profile {
-            options.shell = Some(Shell::new(
-                profile.program.clone(),
-                profile.arguments.clone(),
-            ));
-            options.working_directory = profile.working_directory.clone();
-            options.env = profile.environment.clone();
+            match profile.kind {
+                ProfileKind::Local => {
+                    options.shell = Some(Shell::new(
+                        profile.program.clone(),
+                        profile.arguments.clone(),
+                    ));
+                    options.working_directory = profile.working_directory.clone();
+                    options.env = profile.environment.clone();
+                }
+                ProfileKind::Ssh => {
+                    options.shell = Some(Shell::new("ssh".to_owned(), ssh_arguments(profile)));
+                    configure_askpass(&mut options.env, profile)?;
+                }
+            }
         }
         let pty = tty::new(&options, window_size, 0)?;
         let event_loop = EventLoop::new(
@@ -111,6 +127,9 @@ impl TerminalBackend {
             pressed_button: None,
             forced_full_redraw: None,
             rendered_selection: SelectionSnapshot::default(),
+            scroll_remainder: 0.0,
+            search: SearchState::default(),
+            theme,
         })
     }
 
@@ -120,8 +139,12 @@ impl TerminalBackend {
             return None;
         }
 
-        let forced_full_redraw = self.forced_full_redraw.take();
         let mut terminal = self.terminal.lock();
+        if self.search.refresh_if_due(&mut terminal) {
+            self.forced_full_redraw = Some(super::frame::FullRedrawReason::RendererRequest);
+        }
+        let forced_full_redraw = self.forced_full_redraw.take();
+        let search = self.search.snapshot(&terminal);
         let selection = selection_snapshot(&terminal);
         // 选择区不是 Alacritty 单元本身的 damage，需要补上新旧范围涉及的行。
         let selection_dirty_rows = if selection == self.rendered_selection {
@@ -141,6 +164,8 @@ impl TerminalBackend {
             self.generation,
             forced_full_redraw,
             &selection_dirty_rows,
+            self.theme,
+            search,
         );
         drop(terminal);
         frame.title = self.notifier.take_title();
@@ -157,8 +182,38 @@ impl TerminalBackend {
         self.notifier.mark_dirty();
     }
 
+    pub(super) fn update_search(&mut self, query: String) {
+        let mut terminal = self.terminal.lock();
+        self.search.set_query(&mut terminal, query);
+        drop(terminal);
+        self.request_full_redraw();
+    }
+
+    pub(super) fn search_step(&mut self, previous: bool) {
+        let mut terminal = self.terminal.lock();
+        self.search.step(&mut terminal, previous);
+        drop(terminal);
+        self.request_full_redraw();
+    }
+
     pub(super) fn send_to_pty(&self, text: String) {
         self.notifier.send_to_pty(text);
+    }
+
+    /// 回答 OSC 4/10/11/12 等动态颜色查询，优先返回终端程序当前设置的覆盖色。
+    pub(super) fn respond_color_request(
+        &self,
+        index: usize,
+        formatter: Arc<dyn Fn(alacritty_terminal::vte::ansi::Rgb) -> String + Send + Sync>,
+    ) {
+        let color = {
+            let terminal = self.terminal.lock();
+            let content = terminal.renderable_content();
+            resolve_dynamic_color(index, content.colors, self.theme)
+        };
+        if let Some(color) = color {
+            self.notifier.send_to_pty(formatter(color));
+        }
     }
 
     /// 编码抽象按键，并把生成的 ANSI 字节送进 PTY。
@@ -195,7 +250,12 @@ impl TerminalBackend {
 
         let grid_changed = self.size.columns != size.columns || self.size.rows != size.rows;
         if grid_changed {
-            self.terminal.lock().resize(size);
+            let mut terminal = self.terminal.lock();
+            terminal.resize(size);
+            if !self.search.query().is_empty() {
+                let query = self.search.query().to_owned();
+                self.search.set_query(&mut terminal, query);
+            }
         }
         let new_window_size = window_size(size);
         self.notifier.update_window_size(new_window_size);
@@ -293,7 +353,7 @@ impl TerminalBackend {
 
     /// 根据终端模式把滚轮解释为鼠标报告、方向键或本地历史滚动。
     pub(super) fn mouse_scroll(&mut self, input: MouseScrollInput) {
-        let lines = scroll_lines(input.lines);
+        let lines = accumulate_scroll_lines(&mut self.scroll_remainder, input.lines);
         if lines == 0 {
             return;
         }
@@ -370,6 +430,34 @@ impl TerminalBackend {
     }
 }
 
+fn ssh_arguments(profile: &ShellProfile) -> Vec<String> {
+    let mut arguments = Vec::new();
+    if !profile.ssh_password.is_empty() {
+        // 防止用户的 SendEnv 配置把 askpass 专用密码环境变量发送到远端。
+        arguments.extend([
+            "-o".to_owned(),
+            "SendEnv=-SLINT_TERMINAL_SSH_PASSWORD".to_owned(),
+        ]);
+    }
+    if profile.ssh_port != 22 {
+        arguments.extend(["-p".to_owned(), profile.ssh_port.to_string()]);
+    }
+    if let Some(identity_file) = &profile.ssh_identity_file {
+        arguments.extend([
+            "-i".to_owned(),
+            identity_file.to_string_lossy().into_owned(),
+        ]);
+    }
+    arguments.extend(profile.arguments.iter().cloned());
+    let destination = if profile.ssh_user.is_empty() {
+        profile.ssh_host.clone()
+    } else {
+        format!("{}@{}", profile.ssh_user, profile.ssh_host)
+    };
+    arguments.push(destination);
+    arguments
+}
+
 fn selection_snapshot<T: EventListener>(terminal: &Term<T>) -> SelectionSnapshot {
     let content = terminal.renderable_content();
     SelectionSnapshot {
@@ -427,7 +515,8 @@ fn window_size(size: TerminalSize) -> WindowSize {
 
 #[cfg(test)]
 mod tests {
-    use super::{SelectionSnapshot, encode_paste, visible_selection_rows};
+    use super::{SelectionSnapshot, encode_paste, ssh_arguments, visible_selection_rows};
+    use crate::app::settings::{ProfileKind, ShellProfile};
     use alacritty_terminal::{
         index::{Column, Line, Point},
         selection::SelectionRange,
@@ -463,5 +552,32 @@ mod tests {
             display_offset: 0,
         };
         assert!(visible_selection_rows(hidden, 3).is_empty());
+    }
+
+    #[test]
+    fn ssh_profile_builds_arguments_without_shell_quoting() {
+        let profile = ShellProfile {
+            kind: ProfileKind::Ssh,
+            ssh_host: "example.com".to_owned(),
+            ssh_user: "deploy".to_owned(),
+            ssh_port: 2222,
+            ssh_identity_file: Some("C:\\Keys\\work key".into()),
+            ssh_password: "plain secret".to_owned(),
+            arguments: vec!["-A".to_owned()],
+            ..ShellProfile::default()
+        };
+        assert_eq!(
+            ssh_arguments(&profile),
+            vec![
+                "-o",
+                "SendEnv=-SLINT_TERMINAL_SSH_PASSWORD",
+                "-p",
+                "2222",
+                "-i",
+                "C:\\Keys\\work key",
+                "-A",
+                "deploy@example.com"
+            ]
+        );
     }
 }

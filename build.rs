@@ -1,4 +1,4 @@
 fn main() {
-    // 编译 Slint 根文件及其导入项，并生成供 src/main.rs 引入的 Rust 绑定。
+    // 控件与主题均由项目内 Slint 组件和 DesignTokens 提供。
     slint_build::compile("ui/main.slint").unwrap();
 }

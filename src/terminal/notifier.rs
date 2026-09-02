@@ -10,7 +10,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::Sender,
+        mpsc::SyncSender,
     },
 };
 
@@ -28,12 +28,12 @@ struct NotificationState {
     exit_message: Mutex<Option<String>>,
     /// 构造事件循环后才能取得发送端，因此初始化阶段允许为空。
     pty_sender: Mutex<Option<EventLoopSender>>,
-    worker_sender: Sender<WorkerMessage>,
+    worker_sender: SyncSender<WorkerMessage>,
     window_size: Mutex<WindowSize>,
 }
 
 impl Notifier {
-    pub(super) fn new(window_size: WindowSize, worker_sender: Sender<WorkerMessage>) -> Self {
+    pub(super) fn new(window_size: WindowSize, worker_sender: SyncSender<WorkerMessage>) -> Self {
         Self {
             state: Arc::new(NotificationState {
                 dirty: AtomicBool::new(false),
@@ -111,7 +111,8 @@ impl Notifier {
     /// 标记终端已变化，并在首次变脏时唤醒工作线程。
     pub(super) fn mark_dirty(&self) {
         if !self.state.dirty.swap(true, Ordering::AcqRel) {
-            let _ = self.state.worker_sender.send(WorkerMessage::Render);
+            // EventListener 可能持有终端锁，绝不能在有界队列满时阻塞。
+            let _ = self.state.worker_sender.try_send(WorkerMessage::Render);
         }
     }
 }
@@ -160,15 +161,20 @@ impl EventListener for Notifier {
                 let _ = self
                     .state
                     .worker_sender
-                    .send(WorkerMessage::ClipboardStore(text));
+                    .try_send(WorkerMessage::ClipboardStore(text));
             }
             Event::ClipboardLoad(_, formatter) => {
                 let _ = self
                     .state
                     .worker_sender
-                    .send(WorkerMessage::ClipboardLoad(formatter));
+                    .try_send(WorkerMessage::ClipboardLoad(formatter));
             }
-            Event::ColorRequest(_, _) => {}
+            Event::ColorRequest(index, formatter) => {
+                let _ = self
+                    .state
+                    .worker_sender
+                    .try_send(WorkerMessage::ColorRequest(index, formatter));
+            }
         }
     }
 }

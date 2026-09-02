@@ -1,6 +1,9 @@
 //! 将 Alacritty 的终端网格提取为渲染器可消费的增量帧。
 
-use super::palette::{RgbColor, resolve_color};
+use super::{
+    palette::{RgbColor, TerminalTheme, resolve_color},
+    search::{SearchHighlight, SearchSnapshot},
+};
 use alacritty_terminal::{
     event::EventListener,
     grid::Dimensions,
@@ -26,11 +29,20 @@ pub(crate) struct TerminalCellPatch {
     pub(crate) hidden: bool,
 }
 
-/// 某一行发生变化后的全部可见单元。
+/// 某一行发生变化的列区间；end_column 为开区间。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RowPatch {
     pub(crate) row: usize,
+    pub(crate) start_column: usize,
+    pub(crate) end_column: usize,
     pub(crate) cells: Vec<TerminalCellPatch>,
+}
+
+#[derive(Clone, Copy)]
+struct DamagedSpan {
+    row: usize,
+    start_column: usize,
+    end_column: usize,
 }
 
 /// 光标位置与样式的轻量快照。
@@ -57,6 +69,7 @@ pub(crate) struct FramePatch {
     pub(crate) cursor: CursorPatch,
     pub(crate) scroll_offset: usize,
     pub(crate) scroll_history_lines: usize,
+    pub(crate) search: SearchSnapshot,
     pub(crate) title: Option<String>,
     pub(crate) exit_message: Option<String>,
 }
@@ -70,6 +83,7 @@ pub(crate) enum FullRedrawReason {
 }
 
 /// 读取 Alacritty 的 damage 信息并捕获一帧；函数末尾会清除已消费的 damage。
+#[allow(clippy::too_many_arguments)]
 pub(super) fn capture_frame<T: EventListener>(
     terminal: &mut Term<T>,
     columns: usize,
@@ -77,26 +91,73 @@ pub(super) fn capture_frame<T: EventListener>(
     generation: u64,
     forced_full_redraw: Option<FullRedrawReason>,
     extra_dirty_rows: &[usize],
+    theme: TerminalTheme,
+    search: SearchSnapshot,
 ) -> FramePatch {
+    // 光标位置与当前输入行在视觉上是一个不可拆分的状态。部分 shell 在启动提示符
+    // 输出期间只留下最终光标 damage；若只复制该列，光标会出现而提示符要等选择后才显示。
+    let cursor_point = terminal.grid().cursor.point;
+    let cursor_damage_row = (cursor_point.line.0 >= 0)
+        .then_some(cursor_point.line.0 as usize)
+        .filter(|row| *row < rows);
+
     // 外部强制重绘优先于 Alacritty 自己报告的局部 damage。
-    let (full_redraw_reason, mut damaged_rows) = if let Some(reason) = forced_full_redraw {
-        (Some(reason), (0..rows).collect())
+    let full_spans = || {
+        (0..rows)
+            .map(|row| DamagedSpan {
+                row,
+                start_column: 0,
+                end_column: columns,
+            })
+            .collect::<Vec<_>>()
+    };
+    let (full_redraw_reason, mut damaged_spans) = if let Some(reason) = forced_full_redraw {
+        (Some(reason), full_spans())
     } else {
         match terminal.damage() {
-            TermDamage::Full => (Some(FullRedrawReason::TerminalDamage), (0..rows).collect()),
+            TermDamage::Full => (Some(FullRedrawReason::TerminalDamage), full_spans()),
             TermDamage::Partial(lines) => {
-                let mut rows = lines
-                    .filter_map(|damage| (damage.line < rows).then_some(damage.line))
+                let spans = lines
+                    .filter_map(|damage| {
+                        (damage.line < rows && damage.left < columns).then_some(DamagedSpan {
+                            row: damage.line,
+                            // 扩一列以覆盖宽字符从/向 damage 边界跨越的情况。
+                            start_column: damage.left.saturating_sub(1),
+                            end_column: damage.right.saturating_add(2).min(columns),
+                        })
+                    })
                     .collect::<Vec<_>>();
-                rows.sort_unstable();
-                rows.dedup();
-                (None, rows)
+                (None, spans)
             }
         }
     };
-    damaged_rows.extend(extra_dirty_rows.iter().copied().filter(|row| *row < rows));
-    damaged_rows.sort_unstable();
-    damaged_rows.dedup();
+    if full_redraw_reason.is_none()
+        && let Some(row) = cursor_damage_row
+    {
+        if let Some(span) = damaged_spans.iter_mut().find(|span| span.row == row) {
+            span.start_column = 0;
+            span.end_column = columns;
+        } else {
+            damaged_spans.push(DamagedSpan {
+                row,
+                start_column: 0,
+                end_column: columns,
+            });
+        }
+    }
+    for row in extra_dirty_rows.iter().copied().filter(|row| *row < rows) {
+        if let Some(span) = damaged_spans.iter_mut().find(|span| span.row == row) {
+            span.start_column = 0;
+            span.end_column = columns;
+        } else {
+            damaged_spans.push(DamagedSpan {
+                row,
+                start_column: 0,
+                end_column: columns,
+            });
+        }
+    }
+    damaged_spans.sort_unstable_by_key(|span| span.row);
     let full_redraw = full_redraw_reason.is_some();
 
     // renderable_content 会把滚动偏移、光标和选择区整理为当前视口快照。
@@ -121,21 +182,22 @@ pub(super) fn capture_frame<T: EventListener>(
     let selection = content.selection;
     let grid = terminal.grid();
 
-    let changed_rows = damaged_rows
+    let changed_rows = damaged_spans
         .into_iter()
-        .map(|row| {
+        .map(|span| {
+            let row = span.row;
             let grid_line = Line(row as i32 - display_offset);
-            let mut cells = Vec::with_capacity(columns);
+            let mut cells = Vec::with_capacity(span.end_column - span.start_column);
 
-            for column in 0..columns {
+            for column in span.start_column..span.end_column {
                 let cell = &grid[grid_line][Column(column)];
                 // 宽字符的第二格只是占位符，由前一格的 width_in_columns 覆盖。
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     continue;
                 }
 
-                let mut foreground = resolve_color(cell.fg, colors, true);
-                let mut background = resolve_color(cell.bg, colors, false);
+                let mut foreground = resolve_color(cell.fg, colors, true, theme);
+                let mut background = resolve_color(cell.bg, colors, false, theme);
                 if cell.flags.contains(Flags::INVERSE) {
                     std::mem::swap(&mut foreground, &mut background);
                 }
@@ -143,16 +205,24 @@ pub(super) fn capture_frame<T: EventListener>(
                     foreground = dim_color(foreground);
                 }
                 if selection_contains_cell(selection, grid_line, column, cell.flags) {
-                    foreground = RgbColor {
-                        red: 0xe6,
-                        green: 0xed,
-                        blue: 0xf3,
-                    };
-                    background = RgbColor {
-                        red: 0x26,
-                        green: 0x4f,
-                        blue: 0x78,
-                    };
+                    foreground = theme.selection_foreground;
+                    background = theme.selection_background;
+                }
+                let point = Point::new(grid_line, Column(column));
+                let search_highlight = search.highlight_at(point).or_else(|| {
+                    cell.flags
+                        .contains(Flags::WIDE_CHAR)
+                        .then(|| search.highlight_at(Point::new(grid_line, Column(column + 1))))
+                        .flatten()
+                });
+                match search_highlight {
+                    Some(SearchHighlight::Match) => {
+                        background = theme.search_match_background;
+                    }
+                    Some(SearchHighlight::Current) => {
+                        background = theme.search_current_background;
+                    }
+                    None => {}
                 }
 
                 let hidden = cell.flags.contains(Flags::HIDDEN);
@@ -180,7 +250,12 @@ pub(super) fn capture_frame<T: EventListener>(
                 });
             }
 
-            RowPatch { row, cells }
+            RowPatch {
+                row,
+                start_column: span.start_column,
+                end_column: span.end_column,
+                cells,
+            }
         })
         .collect();
 
@@ -196,6 +271,7 @@ pub(super) fn capture_frame<T: EventListener>(
         cursor,
         scroll_offset,
         scroll_history_lines,
+        search,
         title: None,
         exit_message: None,
     }

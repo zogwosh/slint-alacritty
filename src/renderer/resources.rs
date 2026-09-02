@@ -31,12 +31,7 @@ pub(super) fn rgba(color: RgbColor, alpha: f32) -> [f32; 4] {
     ]
 }
 
-pub(super) fn clear_color() -> wgpu::Color {
-    let color = RgbColor {
-        red: 0x0d,
-        green: 0x11,
-        blue: 0x17,
-    };
+pub(super) fn clear_color(color: RgbColor) -> wgpu::Color {
     wgpu::Color {
         r: f64::from(color.red) / 255.0,
         g: f64::from(color.green) / 255.0,

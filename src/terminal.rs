@@ -8,6 +8,8 @@ mod input;
 mod mouse;
 mod notifier;
 mod palette;
+mod search;
+mod ssh;
 mod worker;
 
 pub(crate) use controller::TerminalController;
@@ -15,4 +17,12 @@ pub(crate) use controller::TerminalController;
 pub(crate) use frame::{CursorPatch, RowPatch};
 pub(crate) use frame::{FramePatch, FullRedrawReason, TerminalCellPatch};
 pub(crate) use input::KeyInput;
-pub(crate) use palette::RgbColor;
+pub(crate) use palette::{RgbColor, TerminalTheme};
+#[cfg(test)]
+pub(crate) use search::SearchSnapshot;
+pub(crate) use ssh::respond_to_askpass_if_requested;
+
+/// Alacritty 的环境初始化会修改进程环境，必须在线程创建前且仅执行一次。
+pub(crate) fn setup_environment() {
+    alacritty_terminal::tty::setup_env();
+}
