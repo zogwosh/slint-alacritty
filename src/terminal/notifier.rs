@@ -24,6 +24,8 @@ pub(super) struct Notifier {
 struct NotificationState {
     /// dirty 从 false 变为 true 时只投递一次 Render，避免消息队列被唤醒事件淹没。
     dirty: AtomicBool,
+    /// 会话在程序未设置标题时显示的名字；`ResetTitle` 回到这里而不是某个全局字符串。
+    default_title: String,
     title: Mutex<Option<String>>,
     exit_message: Mutex<Option<String>>,
     /// 构造事件循环后才能取得发送端，因此初始化阶段允许为空。
@@ -33,10 +35,15 @@ struct NotificationState {
 }
 
 impl Notifier {
-    pub(super) fn new(window_size: WindowSize, worker_sender: SyncSender<WorkerMessage>) -> Self {
+    pub(super) fn new(
+        window_size: WindowSize,
+        worker_sender: SyncSender<WorkerMessage>,
+        default_title: String,
+    ) -> Self {
         Self {
             state: Arc::new(NotificationState {
                 dirty: AtomicBool::new(false),
+                default_title,
                 title: Mutex::new(None),
                 exit_message: Mutex::new(None),
                 pty_sender: Mutex::new(None),
@@ -129,12 +136,14 @@ impl EventListener for Notifier {
                     .expect("terminal title mutex poisoned") = Some(title);
                 self.mark_dirty();
             }
+            // 程序清除标题，或 `Term::set_options` 在没有标题时重放状态，都回到会话默认名。
             Event::ResetTitle => {
                 *self
                     .state
                     .title
                     .lock()
-                    .expect("terminal title mutex poisoned") = Some("Slint Terminal".into());
+                    .expect("terminal title mutex poisoned") =
+                    Some(self.state.default_title.clone());
                 self.mark_dirty();
             }
             Event::PtyWrite(text) => self.send_to_pty(text),

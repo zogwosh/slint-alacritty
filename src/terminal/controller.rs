@@ -38,6 +38,7 @@ pub(crate) struct TerminalController {
 
 impl TerminalController {
     /// 创建终端后端并启动专属工作线程。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         columns: usize,
         rows: usize,
@@ -45,6 +46,7 @@ impl TerminalController {
         cell_height: f32,
         profile: Option<&ShellProfile>,
         theme: TerminalTheme,
+        default_title: String,
         frame_notifier: impl Fn() + Send + Sync + 'static,
     ) -> io::Result<Self> {
         // 有界队列为 UI/PTY 突发流量提供背压；可合并命令不会按事件数增长。
@@ -57,6 +59,7 @@ impl TerminalController {
             worker_sender.clone(),
             profile,
             theme,
+            default_title,
         )?;
         let latest_frame = Arc::new(Mutex::new(None));
         let worker_frame = latest_frame.clone();

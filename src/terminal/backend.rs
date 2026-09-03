@@ -60,6 +60,7 @@ pub(super) struct TerminalBackend {
 
 impl TerminalBackend {
     /// 创建 Alacritty 网格、系统 PTY 和负责读取子进程输出的事件线程。
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         columns: usize,
         rows: usize,
@@ -68,10 +69,11 @@ impl TerminalBackend {
         worker_sender: SyncSender<WorkerMessage>,
         profile: Option<&ShellProfile>,
         theme: TerminalTheme,
+        default_title: String,
     ) -> io::Result<Self> {
         let size = TerminalSize::new(columns, rows, cell_width, cell_height);
         let window_size = window_size(size);
-        let notifier = Notifier::new(window_size, worker_sender);
+        let notifier = Notifier::new(window_size, worker_sender, default_title);
         let terminal = Arc::new(FairMutex::new(Term::new(
             Config::default(),
             &size,

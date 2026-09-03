@@ -88,6 +88,8 @@ pub(super) fn create_session(
 ) -> io::Result<TerminalSession> {
     let weak_ui = ui.as_weak();
     let (cell_width, cell_height) = physical_cell_size(ui);
+    // 标签页的初始名字同时也是程序清除标题后回退的名字，两处必须是同一个字符串。
+    let default_title = format!("Terminal {id}");
     let controller = Rc::new(TerminalController::new(
         columns,
         rows,
@@ -95,6 +97,7 @@ pub(super) fn create_session(
         cell_height,
         profile,
         terminal_theme(ui),
+        default_title.clone(),
         move || {
             let weak_ui = weak_ui.clone();
             let _ = slint::invoke_from_event_loop(move || {
@@ -106,7 +109,7 @@ pub(super) fn create_session(
     )?);
     Ok(TerminalSession {
         id,
-        title: format!("Terminal {id}").into(),
+        title: default_title.into(),
         terminal_active: true,
         exit_message: SharedString::default(),
         scroll_offset: 0,
