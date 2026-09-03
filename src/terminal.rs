@@ -12,6 +12,7 @@ mod search;
 mod ssh;
 mod worker;
 
+pub(crate) use command::TerminalOptions;
 pub(crate) use controller::TerminalController;
 #[cfg(test)]
 pub(crate) use frame::{CursorPatch, RowPatch};

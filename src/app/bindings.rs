@@ -41,6 +41,7 @@ pub(super) fn connect_input(
                         &action_tabs,
                         &action_awaiting,
                         settings.default_profile(),
+                        settings.terminal_options(),
                     );
                 }
             }
@@ -247,7 +248,13 @@ pub(super) fn connect_tabs(
     ui.on_new_tab(move || {
         if let Some(ui) = weak_ui.upgrade() {
             let settings = new_settings.borrow();
-            add_tab(&ui, &new_tabs, &new_awaiting, settings.default_profile());
+            add_tab(
+                &ui,
+                &new_tabs,
+                &new_awaiting,
+                settings.default_profile(),
+                settings.terminal_options(),
+            );
         }
     });
 
@@ -263,7 +270,13 @@ pub(super) fn connect_tabs(
         let Some(profile) = settings.profile(id) else {
             return;
         };
-        add_tab(&ui, &profile_tabs, &profile_awaiting, Some(profile));
+        add_tab(
+            &ui,
+            &profile_tabs,
+            &profile_awaiting,
+            Some(profile),
+            settings.terminal_options(),
+        );
     });
 
     let weak_ui = ui.as_weak();

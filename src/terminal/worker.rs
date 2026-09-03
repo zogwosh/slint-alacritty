@@ -1,6 +1,10 @@
 //! 终端工作线程：串行处理命令，并以约 60Hz 的上限发布增量帧。
 
-use super::{backend::TerminalBackend, command::WorkerMessage, frame::FramePatch};
+use super::{
+    backend::TerminalBackend,
+    command::{MouseEffect, WorkerMessage},
+    frame::FramePatch,
+};
 use arboard::Clipboard;
 use std::{
     sync::{
@@ -99,7 +103,11 @@ pub(super) fn run_worker(
             Some(WorkerMessage::ColorRequest(index, formatter)) => {
                 backend.respond_color_request(index, formatter);
             }
-            Some(WorkerMessage::Mouse(input)) => backend.mouse_input(input),
+            Some(WorkerMessage::Mouse(input)) => match backend.mouse_input(input) {
+                MouseEffect::None => {}
+                MouseEffect::CopyToClipboard(text) => copy_to_clipboard(&mut clipboard, text),
+                MouseEffect::PasteFromClipboard => paste_clipboard(&backend, &mut clipboard),
+            },
             Some(WorkerMessage::MouseScroll(input)) => backend.mouse_scroll(input),
             Some(WorkerMessage::ScrollTo(command)) => {
                 let display_offset = {
@@ -137,6 +145,10 @@ pub(super) fn run_worker(
             }
             Some(WorkerMessage::ForceFullRedraw) => {
                 backend.request_full_redraw();
+                frame_pending = true;
+            }
+            Some(WorkerMessage::SetOptions(options)) => {
+                backend.set_options(options);
                 frame_pending = true;
             }
             Some(WorkerMessage::SetActive(value)) => {

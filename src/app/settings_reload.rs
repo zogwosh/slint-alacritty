@@ -1,7 +1,7 @@
 //! 轮询用户可编辑的 TOML 设置文件，并把变更同步到运行中的应用。
 
 use super::{
-    sessions::{TabManager, activate_session},
+    sessions::{TabManager, activate_session, apply_terminal_options},
     settings::{AppSettings, SettingsWatcher, sync_profile_draft, sync_settings_ui},
 };
 use crate::MainWindow;
@@ -38,9 +38,12 @@ pub(super) fn start(
                 true,
             ),
         };
-        let font_changed = {
+        let (font_changed, options_changed) = {
             let current = settings.borrow();
-            current.font_family != next.font_family || current.font_size != next.font_size
+            (
+                current.font_family != next.font_family || current.font_size != next.font_size,
+                current.terminal_options() != next.terminal_options(),
+            )
         };
         *settings.borrow_mut() = next;
         settings_writable.set(!error);
@@ -51,9 +54,13 @@ pub(super) fn start(
             .profile(selected)
             .or_else(|| settings_ref.default_profile());
         sync_profile_draft(&ui, profile);
+        let options = settings_ref.terminal_options();
         drop(settings_ref);
         ui.set_settings_message_error(error);
         ui.set_settings_message(message.into());
+        if options_changed {
+            apply_terminal_options(&tabs.borrow(), options);
+        }
         if font_changed {
             if let Some((active_id, controller)) = tabs
                 .borrow()

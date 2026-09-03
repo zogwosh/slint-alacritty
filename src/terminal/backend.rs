@@ -4,7 +4,8 @@
 
 use super::{
     command::{
-        MouseAction, MouseButton, MouseInput, MouseScrollInput, TerminalSize, WorkerMessage,
+        MouseAction, MouseButton, MouseEffect, MouseInput, MouseScrollInput, TerminalOptions,
+        TerminalSize, WorkerMessage,
     },
     frame::{FramePatch, capture_frame},
     input::{KeyInput, encode_key},
@@ -16,7 +17,7 @@ use super::{
     search::SearchState,
     ssh::configure_askpass,
 };
-use crate::app::settings::{ProfileKind, ShellProfile};
+use crate::app::settings::{CursorShapeSetting, ProfileKind, ShellProfile};
 use alacritty_terminal::{
     event::WindowSize,
     event_loop::{EventLoop, EventLoopSender, Msg},
@@ -26,6 +27,7 @@ use alacritty_terminal::{
     sync::FairMutex,
     term::{Config, Term},
     tty::{self, Options, Shell},
+    vte::ansi::{CursorShape, CursorStyle},
 };
 use std::{
     borrow::Cow,
@@ -56,6 +58,7 @@ pub(super) struct TerminalBackend {
     scroll_remainder: f32,
     search: SearchState,
     theme: TerminalTheme,
+    options: TerminalOptions,
 }
 
 impl TerminalBackend {
@@ -69,40 +72,41 @@ impl TerminalBackend {
         worker_sender: SyncSender<WorkerMessage>,
         profile: Option<&ShellProfile>,
         theme: TerminalTheme,
+        terminal_options: TerminalOptions,
         default_title: String,
     ) -> io::Result<Self> {
         let size = TerminalSize::new(columns, rows, cell_width, cell_height);
         let window_size = window_size(size);
         let notifier = Notifier::new(window_size, worker_sender, default_title);
         let terminal = Arc::new(FairMutex::new(Term::new(
-            Config::default(),
+            terminal_config(&terminal_options),
             &size,
             notifier.clone(),
         )));
 
-        let mut options = Options::default();
+        let mut pty_options = Options::default();
         if let Some(profile) = profile {
             match profile.kind {
                 ProfileKind::Local => {
-                    options.shell = Some(Shell::new(
+                    pty_options.shell = Some(Shell::new(
                         profile.program.clone(),
                         profile.arguments.clone(),
                     ));
-                    options.working_directory = profile.working_directory.clone();
-                    options.env = profile.environment.clone();
+                    pty_options.working_directory = profile.working_directory.clone();
+                    pty_options.env = profile.environment.clone();
                 }
                 ProfileKind::Ssh => {
-                    options.shell = Some(Shell::new("ssh".to_owned(), ssh_arguments(profile)));
-                    configure_askpass(&mut options.env, profile)?;
+                    pty_options.shell = Some(Shell::new("ssh".to_owned(), ssh_arguments(profile)));
+                    configure_askpass(&mut pty_options.env, profile)?;
                 }
             }
         }
-        let pty = tty::new(&options, window_size, 0)?;
+        let pty = tty::new(&pty_options, window_size, 0)?;
         let event_loop = EventLoop::new(
             terminal.clone(),
             notifier.clone(),
             pty,
-            options.drain_on_exit,
+            pty_options.drain_on_exit,
             false,
         )?;
         let pty_sender = event_loop.channel();
@@ -122,6 +126,7 @@ impl TerminalBackend {
             scroll_remainder: 0.0,
             search: SearchState::default(),
             theme,
+            options: terminal_options,
         })
     }
 
@@ -189,6 +194,20 @@ impl TerminalBackend {
     pub(super) fn request_full_redraw(&mut self) {
         self.forced_full_redraw = Some(super::frame::FullRedrawReason::RendererRequest);
         self.notifier.mark_dirty();
+    }
+
+    /// 滚轮行数与鼠标选项只由本地读取，直接替换即可；
+    /// 只有进入 Alacritty `Config` 的字段变化时才替换其配置——这可能裁掉历史、夹紧显示偏移
+    /// 并改变光标样式，因此要求一次完整重绘。
+    pub(super) fn set_options(&mut self, options: TerminalOptions) {
+        let previous = std::mem::replace(&mut self.options, options);
+        if !terminal_config_changed(&previous, &options) {
+            return;
+        }
+        let mut terminal = self.terminal.lock();
+        terminal.set_options(terminal_config(&options));
+        drop(terminal);
+        self.request_full_redraw();
     }
 
     /// 搜索状态只影响装饰层与查找面板，因此仅标记脏而不请求完整重绘。
@@ -295,7 +314,8 @@ impl TerminalBackend {
     }
 
     /// 在“终端应用鼠标协议”和“本地文本选择”之间路由鼠标事件。
-    pub(super) fn mouse_input(&mut self, input: MouseInput) {
+    /// 返回值只描述需要剪贴板参与的后续动作，剪贴板本身由工作线程持有。
+    pub(super) fn mouse_input(&mut self, input: MouseInput) -> MouseEffect {
         let mut terminal = self.terminal.lock();
         let mode = *terminal.mode();
         // 一次拖动始终归最初接收按下事件的一方所有，避免中途按下/释放 Shift 时，
@@ -340,7 +360,7 @@ impl TerminalBackend {
             if let Some(bytes) = report.filter(|bytes| !bytes.is_empty()) {
                 let _ = self.pty_sender.send(Msg::Input(Cow::Owned(bytes)));
             }
-            return;
+            return MouseEffect::None;
         }
 
         let point = visible_point(&terminal, self.size, input.column, input.row);
@@ -349,6 +369,8 @@ impl TerminalBackend {
         } else {
             Side::Left
         };
+        // 选区定稿的时机：拖动结束或双击选词；开启“选中即复制”时在此刻写剪贴板。
+        let mut selection_finished = false;
         match (input.button, input.action) {
             (MouseButton::Left, MouseAction::Press) => {
                 terminal.selection = Some(Selection::new(SelectionType::Simple, point, side));
@@ -358,6 +380,7 @@ impl TerminalBackend {
                 terminal.selection =
                     Some(Selection::new(SelectionType::Semantic, point, Side::Left));
                 self.selecting = false;
+                selection_finished = true;
             }
             (_, MouseAction::Move) if self.selecting => {
                 if let Some(selection) = &mut terminal.selection {
@@ -369,17 +392,40 @@ impl TerminalBackend {
                     selection.update(point, side);
                 }
                 self.selecting = false;
+                selection_finished = true;
+            }
+            // 沿用 Windows Terminal 的惯例：有选区时右键复制并取消选择，否则粘贴。
+            (MouseButton::Right, MouseAction::Press) if self.options.right_click_paste => {
+                let selected = terminal
+                    .selection_to_string()
+                    .filter(|text| !text.is_empty());
+                let Some(text) = selected else {
+                    return MouseEffect::PasteFromClipboard;
+                };
+                terminal.selection = None;
+                self.selecting = false;
+                drop(terminal);
+                self.notifier.mark_dirty();
+                return MouseEffect::CopyToClipboard(text);
             }
             (_, MouseAction::Cancel) => self.selecting = false,
-            _ => return,
+            _ => return MouseEffect::None,
         }
+        let copied = (selection_finished && self.options.copy_on_select)
+            .then(|| terminal.selection_to_string())
+            .flatten()
+            .filter(|text| !text.is_empty());
         drop(terminal);
         self.notifier.mark_dirty();
+        copied.map_or(MouseEffect::None, MouseEffect::CopyToClipboard)
     }
 
     /// 根据终端模式把滚轮解释为鼠标报告、方向键或本地历史滚动。
     pub(super) fn mouse_scroll(&mut self, input: MouseScrollInput) {
-        let lines = accumulate_scroll_lines(&mut self.scroll_remainder, input.lines);
+        let lines = accumulate_scroll_lines(
+            &mut self.scroll_remainder,
+            input.notches * self.options.scroll_lines as f32,
+        );
         if lines == 0 {
             return;
         }
@@ -515,10 +561,67 @@ fn window_size(size: TerminalSize) -> WindowSize {
     }
 }
 
+/// 只覆盖用户可调的字段，其余沿用 Alacritty 默认值；`set_options` 会整体替换配置，所以集中在这里构造。
+/// 光标样式是“默认值”：终端程序通过 DECSCUSR 等序列设置的样式仍会优先生效。
+fn terminal_config(options: &TerminalOptions) -> Config {
+    Config {
+        scrolling_history: options.scrollback_lines as usize,
+        default_cursor_style: CursorStyle {
+            shape: match options.cursor_shape {
+                CursorShapeSetting::Block => CursorShape::Block,
+                CursorShapeSetting::Underline => CursorShape::Underline,
+                CursorShapeSetting::Beam => CursorShape::Beam,
+            },
+            blinking: options.cursor_blink,
+        },
+        ..Config::default()
+    }
+}
+
+/// `terminal_config` 读取的字段是否有变化。`Config` 没有实现 `PartialEq`，
+/// 且 `Term::set_options` 会整屏标脏并重放标题事件，所以不能对每次选项变更都无条件调用。
+fn terminal_config_changed(previous: &TerminalOptions, next: &TerminalOptions) -> bool {
+    previous.scrollback_lines != next.scrollback_lines
+        || previous.cursor_shape != next.cursor_shape
+        || previous.cursor_blink != next.cursor_blink
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{encode_paste, ssh_arguments};
-    use crate::app::settings::{ProfileKind, ShellProfile};
+    use super::{encode_paste, ssh_arguments, terminal_config_changed};
+    use crate::app::settings::{CursorShapeSetting, ProfileKind, ShellProfile};
+    use crate::terminal::TerminalOptions;
+
+    fn options() -> TerminalOptions {
+        TerminalOptions {
+            scrollback_lines: 10_000,
+            scroll_lines: 3,
+            copy_on_select: false,
+            right_click_paste: false,
+            cursor_shape: CursorShapeSetting::Block,
+            cursor_blink: false,
+        }
+    }
+
+    #[test]
+    fn only_grid_config_fields_trigger_a_config_replacement() {
+        let base = options();
+        let mut local_only = base;
+        local_only.scroll_lines = 5;
+        local_only.copy_on_select = true;
+        local_only.right_click_paste = true;
+        assert!(!terminal_config_changed(&base, &local_only));
+
+        let mut history = base;
+        history.scrollback_lines = 0;
+        assert!(terminal_config_changed(&base, &history));
+        let mut cursor = base;
+        cursor.cursor_shape = CursorShapeSetting::Beam;
+        assert!(terminal_config_changed(&base, &cursor));
+        let mut blink = base;
+        blink.cursor_blink = true;
+        assert!(terminal_config_changed(&base, &blink));
+    }
 
     #[test]
     fn paste_normalizes_lines_and_protects_bracketed_terminator() {

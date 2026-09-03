@@ -34,13 +34,17 @@ pub(crate) fn run() -> Result<(), Box<dyn Error>> {
         ui.set_settings_message(error.into());
     }
     let (initial_columns, initial_rows) = viewport_grid(&ui);
-    let first_session = create_session(
-        &ui,
-        1,
-        initial_columns,
-        initial_rows,
-        settings.borrow().default_profile(),
-    )?;
+    let first_session = {
+        let settings = settings.borrow();
+        create_session(
+            &ui,
+            1,
+            initial_columns,
+            initial_rows,
+            settings.default_profile(),
+            settings.terminal_options(),
+        )?
+    };
     let tabs = Rc::new(RefCell::new(TabManager {
         sessions: vec![first_session],
         active: 0,

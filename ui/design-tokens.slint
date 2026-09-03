@@ -98,4 +98,10 @@ export global DesignTokens {
     out property <length> focus-border-width: 2px;
     out property <float> disabled-opacity: 0.55;
     out property <duration> motion-fast: 150ms;
+
+    // 平台输入常量。
+    // Slint 未公开“一格滚轮等于多少逻辑像素”，这里依赖其 winit 后端的实现：
+    // i-slint-backend-winit/event_loop.rs 中 `MouseScrollDelta::LineDelta(lx, ly) => (lx * 60., ly * 60.)`。
+    // 升级 Slint 时务必核对该常量，否则所有用户的滚轮速度会一起变化。
+    out property <length> wheel-notch-length: 60px;
 }

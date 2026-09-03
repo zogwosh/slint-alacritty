@@ -3,7 +3,9 @@
 use crate::{
     MainWindow, TabData,
     app::settings::ShellProfile,
-    terminal::{FramePatch, RgbColor, RgbaColor, TerminalController, TerminalTheme},
+    terminal::{
+        FramePatch, RgbColor, RgbaColor, TerminalController, TerminalOptions, TerminalTheme,
+    },
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use std::{
@@ -85,6 +87,7 @@ pub(super) fn create_session(
     columns: usize,
     rows: usize,
     profile: Option<&ShellProfile>,
+    options: TerminalOptions,
 ) -> io::Result<TerminalSession> {
     let weak_ui = ui.as_weak();
     let (cell_width, cell_height) = physical_cell_size(ui);
@@ -97,6 +100,7 @@ pub(super) fn create_session(
         cell_height,
         profile,
         terminal_theme(ui),
+        options,
         default_title.clone(),
         move || {
             let weak_ui = weak_ui.clone();
@@ -198,6 +202,7 @@ pub(super) fn add_tab(
     tabs: &Rc<RefCell<TabManager>>,
     awaiting_full_frame: &Rc<Cell<bool>>,
     profile: Option<&ShellProfile>,
+    options: TerminalOptions,
 ) {
     let id = {
         let mut manager = tabs.borrow_mut();
@@ -206,7 +211,7 @@ pub(super) fn add_tab(
         id
     };
     let (columns, rows) = viewport_grid(ui);
-    let session = match create_session(ui, id, columns, rows, profile) {
+    let session = match create_session(ui, id, columns, rows, profile, options) {
         Ok(session) => session,
         Err(error) => {
             eprintln!("failed to create terminal tab: {error}");
@@ -221,6 +226,13 @@ pub(super) fn add_tab(
     sync_tab_ui(ui, &manager);
     drop(manager);
     activate_session(ui, awaiting_full_frame, id, &controller);
+}
+
+/// 终端行为选项是全局设置，改动后要同步到每个已运行的会话，而不只是当前显示的那个。
+pub(super) fn apply_terminal_options(manager: &TabManager, options: TerminalOptions) {
+    for session in &manager.sessions {
+        session.controller.set_options(options);
+    }
 }
 
 /// 让某个会话成为画面来源：对齐当前网格与搜索查询，并要求它重发完整画面。

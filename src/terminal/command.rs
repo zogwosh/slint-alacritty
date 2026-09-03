@@ -1,9 +1,30 @@
 //! UI 线程发给终端工作线程的命令与参数。
 
 use super::input::KeyInput;
+use crate::app::settings::CursorShapeSetting;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::vte::ansi::Rgb;
 use std::sync::{Arc, Mutex};
+
+/// 用户可调的终端行为选项；创建会话时传入，运行中也可整体替换。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalOptions {
+    pub(crate) scrollback_lines: u32,
+    /// 滚轮每格滚动的行数。
+    pub(crate) scroll_lines: u32,
+    pub(crate) copy_on_select: bool,
+    pub(crate) right_click_paste: bool,
+    pub(crate) cursor_shape: CursorShapeSetting,
+    pub(crate) cursor_blink: bool,
+}
+
+/// 本地鼠标处理产生的、需要工作线程借助剪贴板完成的后续动作。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum MouseEffect {
+    None,
+    CopyToClipboard(String),
+    PasteFromClipboard,
+}
 
 /// 高频“只关心最新值”命令的单槽状态；queued 与 value 在同一锁下避免丢失唤醒。
 pub(super) struct CoalescedCommand<T> {
@@ -103,12 +124,12 @@ mod tests {
     }
 }
 
-/// 已换算为字符行数的滚轮输入。
+/// 以“滚轮格”为单位的滚动输入；换算为行数由后端按用户设置完成。
 #[derive(Clone, Copy, Debug)]
 pub(super) struct MouseScrollInput {
     pub(super) column: usize,
     pub(super) row: usize,
-    pub(super) lines: f32,
+    pub(super) notches: f32,
     pub(super) shift: bool,
     pub(super) alt: bool,
     pub(super) control: bool,
@@ -138,6 +159,8 @@ pub(super) enum WorkerMessage {
     Search(String),
     SearchStep(bool),
     ForceFullRedraw,
+    /// 运行中整体替换行为选项；缩小历史上限时超出部分会被立即丢弃。
+    SetOptions(TerminalOptions),
     /// 会话是否正在被显示；后台会话只上报标题与退出状态，不做网格捕获。
     SetActive(bool),
     Render,

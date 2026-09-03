@@ -1,8 +1,8 @@
 use super::{
     backend::TerminalBackend,
     command::{
-        CoalescedCommand, MouseAction, MouseButton, MouseInput, MouseScrollInput, TerminalSize,
-        WorkerMessage,
+        CoalescedCommand, MouseAction, MouseButton, MouseInput, MouseScrollInput, TerminalOptions,
+        TerminalSize, WorkerMessage,
     },
     frame::FramePatch,
     input::KeyInput,
@@ -46,6 +46,7 @@ impl TerminalController {
         cell_height: f32,
         profile: Option<&ShellProfile>,
         theme: TerminalTheme,
+        options: TerminalOptions,
         default_title: String,
         frame_notifier: impl Fn() + Send + Sync + 'static,
     ) -> io::Result<Self> {
@@ -59,6 +60,7 @@ impl TerminalController {
             worker_sender.clone(),
             profile,
             theme,
+            options,
             default_title,
         )?;
         let latest_frame = Arc::new(Mutex::new(None));
@@ -137,6 +139,10 @@ impl TerminalController {
         let _ = self.worker_sender.send(WorkerMessage::ForceFullRedraw);
     }
 
+    pub(crate) fn set_options(&self, options: TerminalOptions) {
+        let _ = self.worker_sender.send(WorkerMessage::SetOptions(options));
+    }
+
     /// 将 Slint 的整数按钮/动作编码转换为内部枚举后入队。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn mouse_input(
@@ -188,7 +194,7 @@ impl TerminalController {
         &self,
         column: usize,
         row: usize,
-        lines: f32,
+        notches: f32,
         shift: bool,
         alt: bool,
         control: bool,
@@ -198,7 +204,7 @@ impl TerminalController {
             .send(WorkerMessage::MouseScroll(MouseScrollInput {
                 column,
                 row,
-                lines,
+                notches,
                 shift,
                 alt,
                 control,

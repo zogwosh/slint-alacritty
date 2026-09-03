@@ -28,11 +28,16 @@ export component TerminalView inherits Rectangle {
     out property <int> column-count: max(2, floor(self.width / self.cell-width + 0.001));
     out property <int> row-count: max(1, floor(self.height / self.cell-height + 0.001));
 
+    // 滚动量归一化为“滚轮格数”上报（触控板的像素增量按同一比例折算），
+    // 每格滚几行由 Rust 按用户设置决定，因此不随字号变化。
+    private property <length> wheel-notch: DesignTokens.wheel-notch-length;
+
     // 这些回调只描述 UI 事件；具体 ANSI 编码和终端模式判断在 Rust 中完成。
     callback key-input(string, bool, bool, bool, bool);
     callback ime-preedit(string);
     callback viewport-resized(int, int);
     callback mouse-input(int, int, int, int, bool, bool, bool, bool);
+    // 第三个参数是滚轮格数（可为小数），正值向上。
     callback mouse-scroll(int, int, float, bool, bool, bool);
     callback scroll-to(int);
     callback search-query-changed(string);
@@ -205,7 +210,7 @@ export component TerminalView inherits Rectangle {
                 root.mouse-scroll(
                     min(root.column-count - 1, max(0, floor(self.mouse-x / root.cell-width))),
                     min(root.row-count - 1, max(0, floor(self.mouse-y / root.cell-height))),
-                    event.delta-y / root.cell-height,
+                    event.delta-y / root.wheel-notch,
                     event.modifiers.shift,
                     event.modifiers.alt,
                     event.modifiers.control,
@@ -231,7 +236,7 @@ export component TerminalView inherits Rectangle {
                 root.mouse-scroll(
                     root.column-count - 1,
                     min(root.row-count - 1, max(0, floor(mouse-y / root.cell-height))),
-                    delta-y / root.cell-height,
+                    delta-y / root.wheel-notch,
                     shift,
                     alt,
                     control,
