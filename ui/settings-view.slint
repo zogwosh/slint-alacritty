@@ -1,5 +1,5 @@
 import { DesignTokens } from "design-tokens.slint";
-import { ShellProfileData, ShortcutData } from "models.slint";
+import { SettingsLimits, ShellProfileData, ShortcutData, TerminalSettingsData } from "models.slint";
 import { AppScrollView } from "components/scroll-view.slint";
 import { AppButton, AppCheckBox, AppComboBox, AppLineEdit, AppSpinBox, AppTextEdit } from "components/form-controls.slint";
 
@@ -34,6 +34,21 @@ component FormLabel inherits Text {
     vertical-alignment: center;
 }
 
+// 同一分区内的小组标题，用于把相关的表单行分块。
+component GroupLabel inherits Text {
+    color: DesignTokens.color-text;
+    font-family: DesignTokens.font-ui;
+    font-size: DesignTokens.text-sm;
+    font-weight: 600;
+}
+
+component HintText inherits Text {
+    color: DesignTokens.color-text-muted;
+    font-family: DesignTokens.font-ui;
+    font-size: DesignTokens.text-xs;
+    wrap: word-wrap;
+}
+
 // 左侧负责设置分类和 Profile 导航，右侧显示当前分类的可滚动详情。
 export component SettingsView inherits Rectangle {
     in property <[ShellProfileData]> profiles;
@@ -52,16 +67,18 @@ export component SettingsView inherits Rectangle {
     in-out property <string> profile-ssh-password;
     in property <[string]> mono-fonts;
     in property <[ShortcutData]> shortcuts;
-    in-out property <int> font-index;
-    in-out property <int> font-size: 15;
+    // 「终端」分区的草稿；控件直接双向绑定到字段，「应用」时整体回传。
+    in-out property <TerminalSettingsData> terminal-settings;
     in property <string> message;
     in property <bool> message-error;
+    private property <bool> terminal-font-valid: root.terminal-settings.font-index >= 0
+        && root.terminal-settings.font-index < root.mono-fonts.length;
     callback select-profile(int);
     callback new-profile;
     callback save-profile(int, string, int, string, string, string, string, string, string, int, string, string);
     callback set-default-profile(int);
     callback remove-profile(int);
-    callback save-font(int, int);
+    callback save-terminal(TerminalSettingsData);
     callback save-shortcut(string, string, bool);
 
     background: DesignTokens.color-canvas;
@@ -128,7 +145,7 @@ export component SettingsView inherits Rectangle {
                 }
                 Rectangle { height: 1px; background: DesignTokens.color-border; }
                 SidebarItem {
-                    label: "外观";
+                    label: "终端";
                     active: root.section == 1;
                     selected => { root.section = 1; }
                 }
@@ -327,27 +344,34 @@ export component SettingsView inherits Rectangle {
                         spacing: DesignTokens.space-3;
 
                         Text {
-                            text: "外观";
+                            text: "终端";
                             color: DesignTokens.color-text;
                             font-family: DesignTokens.font-ui;
                             font-size: DesignTokens.text-lg;
                             font-weight: 600;
                         }
-                        Text {
-                            text: "字体列表来自系统中已安装并被识别为等宽字体的字体族。";
-                            color: DesignTokens.color-text-muted;
-                            font-family: DesignTokens.font-ui;
-                            font-size: DesignTokens.text-xs;
+                        HintText {
+                            text: "以下设置保存后对所有已打开的终端立即生效；光标样式会被终端程序自己的设置覆盖。";
                         }
+
+                        GroupLabel { text: "字体"; }
+                        HintText { text: "字体列表来自系统中已安装并被识别为等宽字体的字体族。"; }
                         GridLayout {
                             spacing: DesignTokens.space-2;
                             Row {
                                 FormLabel { text: "终端字体"; }
-                                AppComboBox { model: root.mono-fonts; current-index <=> root.font-index; }
+                                AppComboBox {
+                                    model: root.mono-fonts;
+                                    current-index <=> root.terminal-settings.font-index;
+                                }
                             }
                             Row {
                                 FormLabel { text: "字号"; }
-                                AppSpinBox { minimum: 8; maximum: 36; value <=> root.font-size; }
+                                AppSpinBox {
+                                    minimum: SettingsLimits.min-font-size;
+                                    maximum: SettingsLimits.max-font-size;
+                                    value <=> root.terminal-settings.font-size;
+                                }
                             }
                         }
                         Rectangle {
@@ -362,20 +386,73 @@ export component SettingsView inherits Rectangle {
                                 height: parent.height - 2 * DesignTokens.space-3;
                                 text: "The quick brown fox jumps over the lazy dog.\n0123456789  中文等宽字体预览";
                                 color: DesignTokens.color-text;
-                                font-family: root.font-index >= 0 && root.font-index < root.mono-fonts.length
-                                    ? root.mono-fonts[root.font-index] : DesignTokens.font-mono;
-                                font-size: root.font-size * 1px;
+                                font-family: root.terminal-font-valid
+                                    ? root.mono-fonts[root.terminal-settings.font-index] : DesignTokens.font-mono;
+                                font-size: root.terminal-settings.font-size * 1px;
                                 wrap: word-wrap;
                                 vertical-alignment: center;
                             }
                         }
+
+                        GroupLabel { text: "滚动"; }
+                        GridLayout {
+                            spacing: DesignTokens.space-2;
+                            Row {
+                                FormLabel { text: "历史行数"; }
+                                AppSpinBox {
+                                    minimum: 0;
+                                    maximum: SettingsLimits.max-scrollback-lines;
+                                    step-size: 1000;
+                                    value <=> root.terminal-settings.scrollback-lines;
+                                }
+                            }
+                            Row {
+                                FormLabel { text: "滚轮每格行数"; }
+                                AppSpinBox {
+                                    minimum: 1;
+                                    maximum: SettingsLimits.max-scroll-lines;
+                                    value <=> root.terminal-settings.scroll-lines;
+                                }
+                            }
+                        }
+                        HintText {
+                            text: "历史行数为每个标签页可向上回滚的最大行数，0 表示不保留历史。";
+                        }
+
+                        GroupLabel { text: "光标"; }
+                        GridLayout {
+                            spacing: DesignTokens.space-2;
+                            Row {
+                                FormLabel { text: "光标样式"; }
+                                AppComboBox {
+                                    model: ["方块", "下划线", "竖线"];
+                                    current-index <=> root.terminal-settings.cursor-shape-index;
+                                }
+                            }
+                        }
+                        AppCheckBox { text: "光标闪烁"; checked <=> root.terminal-settings.cursor-blink; }
+
+                        GroupLabel { text: "鼠标"; }
+                        AppCheckBox {
+                            text: "选中文本后自动复制到剪贴板";
+                            checked <=> root.terminal-settings.copy-on-select;
+                        }
+                        AppCheckBox {
+                            text: "右键单击复制或粘贴";
+                            checked <=> root.terminal-settings.right-click-paste;
+                        }
+                        HintText {
+                            text: "右键单击时：有选中文本则复制并取消选择，否则粘贴剪贴板内容。"
+                                + "终端程序自行接管鼠标时（如 vim、htop），右键仍会交给该程序处理。";
+                        }
+
                         HorizontalLayout {
                             alignment: end;
                             AppButton {
-                                text: "应用字体";
+                                text: "应用";
                                 primary: true;
-                                enabled: root.font-index >= 0 && root.font-index < root.mono-fonts.length;
-                                clicked => { root.save-font(root.font-index, root.font-size); }
+                                enabled: root.terminal-font-valid;
+                                clicked => { root.save-terminal(root.terminal-settings); }
                             }
                         }
                         if !root.message.is-empty : Text {

@@ -10,7 +10,9 @@ mod settings_reload;
 
 use crate::{MainWindow, renderer::GpuTerminalRenderer};
 use sessions::{TabManager, create_session, sync_tab_ui, viewport_grid};
-use settings::{load_or_create, mono_font_families, sync_profile_draft, sync_settings_ui};
+use settings::{
+    load_or_create, mono_font_families, sync_profile_draft, sync_settings_limits, sync_settings_ui,
+};
 use slint::{ComponentHandle, Timer, TimerMode};
 use std::{
     cell::{Cell, RefCell},
@@ -27,6 +29,7 @@ pub(crate) fn run() -> Result<(), Box<dyn Error>> {
     let initial_error = initial_settings.error;
     let settings = Rc::new(RefCell::new(initial_settings.settings));
     let mono_fonts = Rc::new(mono_font_families());
+    sync_settings_limits(&ui);
     sync_settings_ui(&ui, &settings.borrow(), &mono_fonts);
     sync_profile_draft(&ui, settings.borrow().default_profile());
     if let Some(error) = initial_error {

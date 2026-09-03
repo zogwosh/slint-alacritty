@@ -1,10 +1,10 @@
 import { DesignTokens } from "design-tokens.slint";
-import { ShellProfileData, ShortcutData, TabData } from "models.slint";
+import { SettingsLimits, ShellProfileData, ShortcutData, TabData, TerminalSettingsData } from "models.slint";
 import { TitleBar } from "components/title-bar.slint";
 import { SettingsView } from "settings-view.slint";
 import { TerminalView } from "terminal-view.slint";
 
-export { ShellProfileData, ShortcutData, TabData }
+export { SettingsLimits, ShellProfileData, ShortcutData, TabData, TerminalSettingsData }
 
 // 应用根窗口：负责组合标题栏和终端视图，并向 Rust 暴露统一接口。
 export component MainWindow inherits Window {
@@ -60,8 +60,8 @@ export component MainWindow inherits Window {
     in property <int> terminal-cell-height-px: 18;
     private property <length> terminal-cell-width: root.terminal-cell-width-px * 1px / root.scale-factor;
     private property <length> terminal-cell-height: root.terminal-cell-height-px * 1px / root.scale-factor;
-    in-out property <int> settings-font-index;
-    in-out property <int> settings-font-size: 15;
+    // Rust 写入已保存的终端设置；用户在设置页的修改也停留在这里，直到点「应用」回传。
+    in-out property <TerminalSettingsData> terminal-settings-draft;
     in property <string> settings-message;
     in property <bool> settings-message-error;
     private property <bool> app-altgr-active;
@@ -88,7 +88,7 @@ export component MainWindow inherits Window {
     callback save-profile(int, string, int, string, string, string, string, string, string, int, string, string);
     callback set-default-profile(int);
     callback remove-profile(int);
-    callback save-font(int, int);
+    callback save-terminal(TerminalSettingsData);
     callback save-shortcut(string, string, bool);
     callback drag-window(float, float);
 
@@ -253,8 +253,7 @@ export component MainWindow inherits Window {
             profile-ssh-identity-file <=> root.profile-ssh-identity-file-draft;
             profile-ssh-password <=> root.profile-ssh-password-draft;
             mono-fonts: root.mono-fonts;
-            font-index <=> root.settings-font-index;
-            font-size <=> root.settings-font-size;
+            terminal-settings <=> root.terminal-settings-draft;
             message: root.settings-message;
             message-error: root.settings-message-error;
             select-profile(id) => { root.select-profile(id); }
@@ -266,7 +265,7 @@ export component MainWindow inherits Window {
             }
             set-default-profile(id) => { root.set-default-profile(id); }
             remove-profile(id) => { root.remove-profile(id); }
-            save-font(index, size) => { root.save-font(index, size); }
+            save-terminal(draft) => { root.save-terminal(draft); }
             save-shortcut(action, shortcut, pass-through) => {
                 root.save-shortcut(action, shortcut, pass-through);
             }

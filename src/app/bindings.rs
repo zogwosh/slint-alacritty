@@ -2,8 +2,14 @@
 
 use super::{
     input::{KeyAction, configured_key_action, normalize_key},
-    sessions::{TabManager, activate_session, add_tab, close_tab, physical_cell_size, sync_tab_ui},
-    settings::{AppSettings, build_profile, sync_profile_draft, sync_settings_ui, update_shortcut},
+    sessions::{
+        TabManager, activate_session, add_tab, apply_terminal_options, close_tab,
+        physical_cell_size, sync_tab_ui,
+    },
+    settings::{
+        AppSettings, CursorShapeSetting, MAX_FONT_SIZE, MAX_SCROLL_LINES, MAX_SCROLLBACK_LINES,
+        MIN_FONT_SIZE, build_profile, sync_profile_draft, sync_settings_ui, update_shortcut,
+    },
 };
 use crate::{MainWindow, terminal::TerminalController};
 use slint::{ComponentHandle, PhysicalPosition};
@@ -519,36 +525,52 @@ pub(super) fn connect_tabs(
         }
     });
 
-    let font_settings = settings.clone();
-    let font_fonts = mono_fonts.clone();
-    let font_writable = settings_writable.clone();
+    let terminal_settings = settings.clone();
+    let terminal_fonts = mono_fonts.clone();
+    let terminal_writable = settings_writable.clone();
     let weak_ui = ui.as_weak();
-    ui.on_save_font(move |index, size| {
+    // 「终端」分区的草稿由 Slint 整体带回；Rust 只负责校验、落盘并广播给运行中的会话。
+    ui.on_save_terminal(move |draft| {
         let Some(ui) = weak_ui.upgrade() else {
             return;
         };
-        if !ensure_settings_writable(&ui, &font_writable) {
+        if !ensure_settings_writable(&ui, &terminal_writable) {
             return;
         }
-        let Some(family) = font_fonts.get(index.max(0) as usize) else {
+        let Some(family) = terminal_fonts.get(draft.font_index.max(0) as usize) else {
             ui.set_settings_message_error(true);
             ui.set_settings_message("错误：请选择有效的等宽字体".into());
             return;
         };
-        let mut candidate = font_settings.borrow().clone();
+        let size = draft.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+        let mut candidate = terminal_settings.borrow().clone();
+        let font_changed = candidate.font_family != *family || candidate.font_size != size;
         candidate.font_family = family.clone();
-        candidate.font_size = size.clamp(8, 36);
+        candidate.font_size = size;
+        candidate.scrollback_lines =
+            draft.scrollback_lines.clamp(0, MAX_SCROLLBACK_LINES as i32) as u32;
+        candidate.scroll_lines = draft.scroll_lines.clamp(1, MAX_SCROLL_LINES as i32) as u32;
+        candidate.cursor_shape = CursorShapeSetting::from_index(draft.cursor_shape_index);
+        candidate.cursor_blink = draft.cursor_blink;
+        candidate.copy_on_select = draft.copy_on_select;
+        candidate.right_click_paste = draft.right_click_paste;
+        let options_changed =
+            terminal_settings.borrow().terminal_options() != candidate.terminal_options();
         match candidate.save() {
             Ok(()) => {
-                *font_settings.borrow_mut() = candidate;
-                let settings = font_settings.borrow();
+                *terminal_settings.borrow_mut() = candidate;
+                let settings = terminal_settings.borrow();
                 ui.set_settings_message_error(false);
-                sync_settings_ui(&ui, &settings, &font_fonts);
-                ui.set_settings_message("字体设置已应用。".into());
-                if let Some((active_id, controller)) = tabs
-                    .borrow()
-                    .selected_session()
-                    .map(|session| (session.id, session.controller.clone()))
+                sync_settings_ui(&ui, &settings, &terminal_fonts);
+                ui.set_settings_message("终端设置已应用。".into());
+                if options_changed {
+                    apply_terminal_options(&tabs.borrow(), settings.terminal_options());
+                }
+                if font_changed
+                    && let Some((active_id, controller)) = tabs
+                        .borrow()
+                        .selected_session()
+                        .map(|session| (session.id, session.controller.clone()))
                 {
                     activate_session(&ui, &awaiting_full_frame, active_id, &controller);
                 }

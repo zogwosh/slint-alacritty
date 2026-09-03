@@ -11,7 +11,9 @@ pub(super) use profiles::build_profile;
 pub(crate) use shortcuts::parse_shortcut;
 pub(super) use shortcuts::update_shortcut;
 pub(super) use storage::{SettingsWatcher, load_or_create};
-pub(super) use ui_sync::{sync_font_metrics, sync_profile_draft, sync_settings_ui};
+pub(super) use ui_sync::{
+    sync_font_metrics, sync_profile_draft, sync_settings_limits, sync_settings_ui,
+};
 
 use crate::terminal::TerminalOptions;
 use serde::{Deserialize, Serialize};
@@ -19,6 +21,8 @@ use std::{collections::HashMap, io, path::PathBuf};
 
 const DEFAULT_FONT_FAMILY: &str = "Cascadia Mono";
 const DEFAULT_FONT_SIZE: i32 = 15;
+pub(crate) const MIN_FONT_SIZE: i32 = 8;
+pub(crate) const MAX_FONT_SIZE: i32 = 36;
 const DEFAULT_SCROLLBACK_LINES: u32 = 10_000;
 /// 与 Alacritty 自身的配置上限一致；每行都常驻内存，再大会让长会话占用失控。
 pub(crate) const MAX_SCROLLBACK_LINES: u32 = 100_000;
@@ -33,6 +37,25 @@ pub(crate) enum CursorShapeSetting {
     Block,
     Underline,
     Beam,
+}
+
+impl CursorShapeSetting {
+    /// 与设置页下拉框的选项顺序一一对应。
+    pub(crate) fn from_index(index: i32) -> Self {
+        match index {
+            1 => Self::Underline,
+            2 => Self::Beam,
+            _ => Self::Block,
+        }
+    }
+
+    pub(crate) fn index(self) -> i32 {
+        match self {
+            Self::Block => 0,
+            Self::Underline => 1,
+            Self::Beam => 2,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -204,8 +227,10 @@ impl AppSettings {
         if self.font_family.trim().is_empty() {
             return Err("字段 font_family 不能为空".to_owned());
         }
-        if !(8..=36).contains(&self.font_size) {
-            return Err("字段 font_size 必须在 8 到 36 之间".to_owned());
+        if !(MIN_FONT_SIZE..=MAX_FONT_SIZE).contains(&self.font_size) {
+            return Err(format!(
+                "字段 font_size 必须在 {MIN_FONT_SIZE} 到 {MAX_FONT_SIZE} 之间"
+            ));
         }
         if self.scrollback_lines > MAX_SCROLLBACK_LINES {
             return Err(format!(
@@ -223,7 +248,7 @@ impl AppSettings {
 
     fn normalize(&mut self) {
         self.font_family = self.font_family.trim().to_owned();
-        self.font_size = self.font_size.clamp(8, 36);
+        self.font_size = self.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
         self.scrollback_lines = self.scrollback_lines.min(MAX_SCROLLBACK_LINES);
         self.scroll_lines = self.scroll_lines.clamp(1, MAX_SCROLL_LINES);
         shortcuts::normalize_shortcuts(&mut self.shortcuts);
@@ -283,6 +308,18 @@ mod tests {
         let settings: AppSettings = toml::from_str("scroll_lines = 0").unwrap();
         assert!(settings.validate().unwrap_err().contains("scroll_lines"));
         assert!(toml::from_str::<AppSettings>("cursor_shape = \"circle\"").is_err());
+    }
+
+    #[test]
+    fn cursor_shape_round_trips_through_combo_index() {
+        for shape in [
+            CursorShapeSetting::Block,
+            CursorShapeSetting::Underline,
+            CursorShapeSetting::Beam,
+        ] {
+            assert_eq!(CursorShapeSetting::from_index(shape.index()), shape);
+        }
+        assert_eq!(CursorShapeSetting::from_index(-1), CursorShapeSetting::Block);
     }
 
     #[test]

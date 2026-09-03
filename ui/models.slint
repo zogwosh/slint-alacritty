@@ -22,3 +22,24 @@ export struct ShortcutData {
     shortcut: string,
     pass-through: bool,
 }
+
+// 「终端」设置分区的一组表单值：Rust 用它下发已保存的设置，点「应用」时原样带回。
+// 新增选项只需在这里加字段，不必在 SettingsView 与 MainWindow 之间逐项转发。
+export struct TerminalSettingsData {
+    font-index: int,
+    font-size: int,
+    scrollback-lines: int,
+    scroll-lines: int,
+    cursor-shape-index: int,
+    cursor-blink: bool,
+    copy-on-select: bool,
+    right-click-paste: bool,
+}
+
+// 设置项的取值范围。真源是 Rust 侧的常量，启动时写入；Slint 只用它限制输入控件。
+export global SettingsLimits {
+    in-out property <int> min-font-size;
+    in-out property <int> max-font-size;
+    in-out property <int> max-scrollback-lines;
+    in-out property <int> max-scroll-lines;
+}
