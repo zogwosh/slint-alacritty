@@ -17,6 +17,8 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(130);
 /// 邮箱中累积的行补丁超过“整屏行数 × 该倍数”时放弃合并，改为请求一次完整重绘。
 const MAILBOX_ROW_PATCH_FACTOR: usize = 8;
+/// 终端程序通过 OSC 52 写入剪贴板的最大字节数，防止不可信输出填满系统剪贴板。
+const OSC52_CLIPBOARD_LIMIT: usize = 1024 * 1024;
 
 /// 工作线程主循环。没有待渲染内容时会阻塞等待消息，避免空转。
 pub(super) fn run_worker(
@@ -80,18 +82,10 @@ pub(super) fn run_worker(
                     frame_pending = true;
                 }
             }
-            Some(WorkerMessage::PasteClipboard) => {
-                if let Some(text) = clipboard
-                    .as_mut()
-                    .and_then(|clipboard| clipboard.get_text().ok())
-                {
-                    backend.paste(&text);
-                }
-            }
-            Some(WorkerMessage::ClipboardStore(text)) if text.len() <= 1024 * 1024 => {
-                if let Some(clipboard) = &mut clipboard {
-                    let _ = clipboard.set_text(text);
-                }
+            Some(WorkerMessage::PasteClipboard) => paste_clipboard(&backend, &mut clipboard),
+            // OSC 52 来自终端程序（可能是远端），只有它需要限长；本地选区复制是用户主动行为，不设上限。
+            Some(WorkerMessage::ClipboardStore(text)) if text.len() <= OSC52_CLIPBOARD_LIMIT => {
+                copy_to_clipboard(&mut clipboard, text);
             }
             Some(WorkerMessage::ClipboardStore(_)) => {}
             Some(WorkerMessage::ClipboardLoad(formatter)) => {
@@ -119,10 +113,8 @@ pub(super) fn run_worker(
                 }
             }
             Some(WorkerMessage::CopySelection) => {
-                if let Some(text) = backend.selected_text().filter(|text| !text.is_empty())
-                    && let Some(clipboard) = &mut clipboard
-                {
-                    let _ = clipboard.set_text(text);
+                if let Some(text) = backend.selected_text().filter(|text| !text.is_empty()) {
+                    copy_to_clipboard(&mut clipboard, text);
                 }
             }
             Some(WorkerMessage::SelectAll) => backend.select_all(),
@@ -185,6 +177,22 @@ pub(super) fn run_worker(
             }
             frame_pending = overflowed;
         }
+    }
+}
+
+fn paste_clipboard(backend: &TerminalBackend, clipboard: &mut Option<Clipboard>) {
+    if let Some(text) = clipboard
+        .as_mut()
+        .and_then(|clipboard| clipboard.get_text().ok())
+    {
+        backend.paste(&text);
+    }
+}
+
+/// 系统剪贴板不可用（如无桌面会话）时静默忽略，与其他剪贴板路径一致。
+fn copy_to_clipboard(clipboard: &mut Option<Clipboard>, text: String) {
+    if let Some(clipboard) = clipboard {
+        let _ = clipboard.set_text(text);
     }
 }
 
