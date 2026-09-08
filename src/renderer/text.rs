@@ -1,8 +1,8 @@
-//! 终端专用文字 shaping：ASCII 连字按连续 run 缓存，fallback/宽字符始终锚定网格列。
-
+//! Terminal shaping with an explicit UTF-8 cluster -> grid column mapping.
+//! Font advances only position glyphs inside a cluster; the grid owns cluster placement.
 use crate::terminal::{RgbColor, TerminalCellPatch};
-use glyphon::{
-    Attrs, Buffer, Color as GlyphColor, Family, FontSystem, Metrics, Shaping, Style, Weight, Wrap,
+use cosmic_text::{
+    Attrs, Buffer, Family, FontSystem, LayoutGlyph, Metrics, Shaping, Style, Weight, Wrap,
 };
 use std::{cell::RefCell, collections::HashMap};
 use unicode_segmentation::UnicodeSegmentation;
@@ -12,22 +12,16 @@ struct CellMetricsCache {
     font_system: FontSystem,
     values: HashMap<(String, u32), CellMetrics>,
 }
-
 thread_local! {
-    /// 度量器在线程内复用，并缓存已测组合；FontSystem 从共享字体库克隆。
     static CELL_METRICS_CACHE: RefCell<CellMetricsCache> = RefCell::new(CellMetricsCache {
-        font_system: super::fonts::font_system(),
-        values: HashMap::new(),
+        font_system: super::fonts::font_system(), values: HashMap::new(),
     });
 }
-
-/// 终端单元在物理像素下的整数尺寸。整数尺寸保证列边界、行裁剪和字形子像素相位一致。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CellMetrics {
     pub(crate) width: u32,
     pub(crate) height: u32,
 }
-
 #[derive(Clone, Copy)]
 pub(super) struct GridTextMetrics<'a> {
     metrics: Metrics,
@@ -35,7 +29,6 @@ pub(super) struct GridTextMetrics<'a> {
     cell_height: f32,
     font_family: &'a str,
 }
-
 impl<'a> GridTextMetrics<'a> {
     pub(super) fn new(
         metrics: Metrics,
@@ -51,205 +44,237 @@ impl<'a> GridTextMetrics<'a> {
         }
     }
 }
-
-/// 一个明确锚定到终端列的 shaping run。
-pub(super) struct TextRunBuffer {
-    pub(super) buffer: Buffer,
-    column: usize,
-    columns: usize,
-    center_in_cells: bool,
-    x_offset: f32,
-    /// glyphon 根据本行实际 fallback 字体算出的基线；渲染时会对齐到终端固定基线。
-    baseline: f32,
+#[derive(Clone, Debug)]
+pub(super) struct GridGlyph {
+    pub(super) layout: LayoutGlyph,
+    pub(super) start_column: usize,
+    pub(super) end_column: usize,
 }
-
-impl TextRunBuffer {
-    pub(super) fn update_metrics(
-        &mut self,
-        font_system: &mut FontSystem,
-        metrics: Metrics,
-        cell_width: f32,
-        cell_height: f32,
-    ) {
-        self.buffer.set_metrics_and_size(
-            font_system,
-            metrics,
-            Some(self.columns as f32 * cell_width),
-            Some(cell_height),
-        );
-        self.buffer
-            .set_monospace_width(font_system, Some(cell_width));
-        self.refresh_layout(cell_width);
-    }
-
-    pub(super) fn baseline(&self) -> f32 {
-        self.baseline
-    }
-
-    pub(super) fn column(&self) -> usize {
-        self.column
-    }
-
-    pub(super) fn x_offset(&self) -> f32 {
-        self.x_offset
-    }
-
-    fn refresh_layout(&mut self, cell_width: f32) {
-        let Some(run) = self.buffer.layout_runs().next() else {
-            self.baseline = 0.0;
-            self.x_offset = 0.0;
-            return;
-        };
-        self.baseline = run.line_y;
-        self.x_offset = if self.center_in_cells {
-            (self.columns as f32 * cell_width - run.line_w).max(0.0) / 2.0
-        } else {
-            0.0
-        };
-    }
+/// Positioned glyphs and independent cell paint. No paragraph layout reaches the GPU.
+pub(super) struct ShapedRun {
+    pub(super) glyphs: Vec<GridGlyph>,
+    pub(super) cells: Vec<TerminalCellPatch>,
 }
-
-/// 决定字体选择与 shaping 的属性；变化时必须切断 run。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ShapeStyle {
     bold: bool,
     italic: bool,
 }
-
-/// 只影响字形绘制颜色的属性；作为 rich-text span 存在于同一个 run 内，不切断连字。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PaintStyle {
-    foreground: RgbColor,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct PaintSpan {
-    text: String,
-    paint: PaintStyle,
-}
-
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 struct TextRun {
-    spans: Vec<PaintSpan>,
+    text: String,
+    cells: Vec<TerminalCellPatch>,
     shape: ShapeStyle,
-    column: usize,
+}
+
+fn glyph_cells<'a>(
     columns: usize,
-    mergeable_ascii: bool,
+    cells: impl IntoIterator<Item = &'a TerminalCellPatch>,
+) -> impl Iterator<Item = &'a TerminalCellPatch> {
+    cells
+        .into_iter()
+        .filter(move |c| c.column < columns && !c.hidden && !c.is_blank())
 }
-
-#[cfg(test)]
-impl TextRun {
-    fn text(&self) -> String {
-        self.spans.iter().map(|span| span.text.as_str()).collect()
+pub(super) fn same_glyph_content<'a>(
+    columns: usize,
+    previous: impl IntoIterator<Item = &'a TerminalCellPatch>,
+    next: impl IntoIterator<Item = &'a TerminalCellPatch>,
+) -> bool {
+    let key = |c: &'a TerminalCellPatch| {
+        (
+            c.column,
+            c.width_in_columns,
+            c.bold,
+            c.italic,
+            c.foreground,
+            c.character,
+            c.zerowidth.as_deref(),
+        )
+    };
+    glyph_cells(columns, previous)
+        .map(key)
+        .eq(glyph_cells(columns, next).map(key))
+}
+fn build_text_runs(columns: usize, cells: &[TerminalCellPatch]) -> Vec<TextRun> {
+    let mut runs: Vec<TextRun> = Vec::new();
+    for cell in glyph_cells(columns, cells) {
+        let shape = ShapeStyle {
+            bold: cell.bold,
+            italic: cell.italic,
+        };
+        let merge = runs.last().is_some_and(|r| {
+            r.shape == shape
+                && r.cells
+                    .last()
+                    .is_some_and(|c| c.column + c.width_in_columns == cell.column)
+        });
+        if !merge {
+            runs.push(TextRun {
+                text: String::new(),
+                cells: Vec::new(),
+                shape,
+            });
+        }
+        let run = runs.last_mut().unwrap();
+        run.text.push(cell.character);
+        run.text.extend(cell.zerowidth.as_deref().unwrap_or(&[]));
+        let mut cell = cell.clone();
+        cell.width_in_columns = cell.width_in_columns.max(1).min(columns - cell.column);
+        run.cells.push(cell);
     }
+    runs
 }
-
-/// 为一行创建网格锚定的 run。连续 ASCII 可共同 shaping 连字；宽字符和 fallback
-/// 字符各自以 Alacritty 给出的列位置为准，绝不使用自然 advance 推导下一列。
 pub(super) fn create_row_buffers(
-    font_system: &mut FontSystem,
+    fs: &mut FontSystem,
     grid: GridTextMetrics<'_>,
     columns: usize,
     cells: &[TerminalCellPatch],
-) -> Vec<TextRunBuffer> {
+) -> Vec<ShapedRun> {
     build_text_runs(columns, cells)
         .into_iter()
-        .map(|run| create_text_run_buffer(font_system, grid, run))
+        .map(|run| shape_run(fs, grid, run))
         .collect()
 }
-
-fn create_text_run_buffer(
-    font_system: &mut FontSystem,
-    grid: GridTextMetrics<'_>,
-    run: TextRun,
-) -> TextRunBuffer {
-    let mut buffer = Buffer::new(font_system, grid.metrics);
-    buffer.set_size(
-        font_system,
-        Some(run.columns as f32 * grid.cell_width),
-        Some(grid.cell_height),
-    );
-    buffer.set_wrap(font_system, Wrap::None);
-    buffer.set_monospace_width(font_system, Some(grid.cell_width));
-    // cosmic-text 判断相邻 span 能否一起 shaping 时不比较颜色，因此跨颜色边界的连字仍然成立。
-    let base_attrs = attrs(grid.font_family, run.shape);
-    buffer.set_rich_text(
-        font_system,
-        run.spans.iter().map(|span| {
-            (
-                span.text.as_str(),
-                base_attrs.clone().color(glyph_color(span.paint.foreground)),
-            )
-        }),
-        &base_attrs,
-        Shaping::Advanced,
-        None,
-    );
-    buffer.shape_until_scroll(font_system, false);
-    let (baseline, x_offset) = buffer.layout_runs().next().map_or((0.0, 0.0), |layout| {
-        let x_offset = if run.mergeable_ascii {
-            0.0
+fn shape_run(fs: &mut FontSystem, grid: GridTextMetrics<'_>, run: TextRun) -> ShapedRun {
+    let mut buffer = Buffer::new(fs, grid.metrics);
+    buffer.set_size(fs, None, Some(grid.cell_height));
+    buffer.set_wrap(fs, Wrap::None);
+    let attrs = Attrs::new()
+        .family(Family::Name(grid.font_family))
+        .weight(if run.shape.bold {
+            Weight::BOLD
         } else {
-            (run.columns as f32 * grid.cell_width - layout.line_w).max(0.0) / 2.0
-        };
-        (layout.line_y, x_offset)
-    });
-    TextRunBuffer {
-        buffer,
-        column: run.column,
-        columns: run.columns,
-        center_in_cells: !run.mergeable_ascii,
-        x_offset,
-        baseline,
+            Weight::NORMAL
+        })
+        .style(if run.shape.italic {
+            Style::Italic
+        } else {
+            Style::Normal
+        });
+    buffer.set_text(fs, &run.text, &attrs, Shaping::Advanced, None);
+    buffer.shape_until_scroll(fs, false);
+    let mut glyphs: Vec<LayoutGlyph> = buffer
+        .layout_runs()
+        .flat_map(|r| r.glyphs.iter().cloned())
+        .collect();
+    // Each source cell keeps its full base+combining sequence as one mapping interval.
+    let mut byte = 0;
+    let mapping: Vec<_> = run
+        .cells
+        .iter()
+        .map(|cell| {
+            let start = byte;
+            byte += cell.character.len_utf8()
+                + cell
+                    .zerowidth
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|c| c.len_utf8())
+                    .sum::<usize>();
+            (
+                start,
+                byte,
+                cell.column,
+                cell.column + cell.width_in_columns,
+            )
+        })
+        .collect();
+    let mut groups: Vec<(usize, usize, Vec<usize>)> = glyphs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, g)| {
+            let first = mapping.partition_point(|m| m.1 <= g.start);
+            let last = mapping.partition_point(|m| m.0 < g.end);
+            (first < last).then(|| (mapping[first].2, mapping[last - 1].3, vec![i]))
+        })
+        .collect();
+    groups.sort_by_key(|g| g.0);
+    let mut merged: Vec<(usize, usize, Vec<usize>)> = Vec::new();
+    for (start, end, indices) in groups {
+        if let Some(last) = merged.last_mut()
+            && start < last.1
+        {
+            last.1 = last.1.max(end);
+            last.2.extend(indices);
+        } else {
+            merged.push((start, end, indices));
+        }
+    }
+    let mut positioned = Vec::new();
+    for (start, end, mut indices) in merged {
+        // Preserve shaper order within a cluster, including mark placement and fallback offsets.
+        indices.sort_unstable();
+        let left = indices
+            .iter()
+            .map(|&i| glyphs[i].x)
+            .fold(f32::INFINITY, f32::min);
+        let right = indices
+            .iter()
+            .map(|&i| glyphs[i].x + glyphs[i].w)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let padding = (((end - start) as f32 * grid.cell_width - (right - left)) / 2.0).max(0.0);
+        let shift = start as f32 * grid.cell_width + padding - left;
+        for i in indices {
+            glyphs[i].x += shift;
+            positioned.push(GridGlyph {
+                layout: glyphs[i].clone(),
+                start_column: start,
+                end_column: end,
+            });
+        }
+    }
+    ShapedRun {
+        glyphs: positioned,
+        cells: run.cells,
     }
 }
-
-/// IME 预编辑也按 grapheme 和 Unicode 列宽拆成相同的网格锚定 run。
-pub(super) fn create_preedit_buffers(
-    font_system: &mut FontSystem,
-    grid: GridTextMetrics<'_>,
-    available_columns: usize,
+/// Compose in a temporary row. Whole intersected wide cells are replaced; PTY state is untouched.
+pub(super) fn compose_preedit(
+    cells: &[TerminalCellPatch],
+    columns: usize,
+    column: usize,
     text: &str,
     foreground: RgbColor,
-) -> (Vec<TextRunBuffer>, usize) {
-    if text.is_empty() || available_columns == 0 {
-        return (Vec::new(), 0);
-    }
-    let shape = ShapeStyle {
-        bold: false,
-        italic: false,
-    };
-    let paint = PaintStyle { foreground };
-    let mut runs = Vec::new();
-    let mut column = 0;
+) -> (Vec<TerminalCellPatch>, usize) {
+    let mut overlay = Vec::new();
+    let mut end = column;
     for grapheme in UnicodeSegmentation::graphemes(text, true) {
-        if column >= available_columns {
+        if grapheme.chars().any(char::is_control) {
+            continue;
+        }
+        let width = UnicodeWidthStr::width(grapheme).max(1);
+        if end + width > columns {
             break;
         }
-        let columns = UnicodeWidthStr::width(grapheme)
-            .max(1)
-            .min(available_columns - column);
-        let mut characters = grapheme.chars();
-        let Some(character) = characters.next() else {
+        let mut chars = grapheme.chars();
+        let Some(character) = chars.next() else {
             continue;
         };
-        let zerowidth = characters.collect::<Vec<_>>();
-        push_grid_run(
-            &mut runs,
+        let marks: Vec<_> = chars.collect();
+        overlay.push(TerminalCellPatch {
             character,
-            &zerowidth,
-            shape,
-            paint,
-            column,
-            columns,
-        );
-        column += columns;
+            zerowidth: (!marks.is_empty()).then(|| marks.into_boxed_slice()),
+            foreground,
+            background: foreground,
+            column: end,
+            width_in_columns: width,
+            bold: false,
+            italic: false,
+            underline_style: 0,
+            strikeout: false,
+            hidden: false,
+        });
+        end += width;
     }
-    let buffers = runs
-        .into_iter()
-        .map(|run| create_text_run_buffer(font_system, grid, run))
+    let mut result: Vec<_> = cells
+        .iter()
+        .filter(|c| end == column || c.column + c.width_in_columns <= column || c.column >= end)
+        .cloned()
         .collect();
-    (buffers, column)
+    result.extend(overlay);
+    result.sort_by_key(|c| c.column);
+    (result, end - column)
 }
 
 /// 主字体在一个终端单元内的稳定基线。fallback 字体不能改变这个值。
@@ -277,13 +302,8 @@ pub(super) fn measure_fixed_baseline(
         .map_or(cell_height * 0.75, |run| run.line_y)
 }
 
-/// 把内容相关基线平移到终端固定基线。
-pub(super) fn baseline_aligned_top(row_top: f32, fixed_baseline: f32, shaped_baseline: f32) -> f32 {
-    row_top + fixed_baseline - shaped_baseline
-}
-
 /// 以物理像素字号测量主字体，得到整数单元尺寸：宽度取平均 advance，高度取
-/// ascent + descent + line gap。与终端渲染器共用同一字体库，避免 UI 与 glyphon 各算一套。
+/// ascent + descent + line gap。与终端渲染器共用同一字体库，避免 UI 与渲染器各算一套。
 pub(crate) fn measure_cell(font_family: &str, physical_font_size: f32) -> CellMetrics {
     let font_size = physical_font_size.max(1.0);
     let key = (font_family.to_owned(), font_size.to_bits());
@@ -320,320 +340,180 @@ pub(crate) fn measure_cell(font_family: &str, physical_font_size: f32) -> CellMe
         }
         let result = CellMetrics {
             width: advance.unwrap_or(font_size * 0.6).round().max(1.0) as u32,
-            height: line_height
-                .unwrap_or(font_size * 1.2)
-                .round()
-                .max(1.0) as u32,
+            height: line_height.unwrap_or(font_size * 1.2).round().max(1.0) as u32,
         };
         cache.values.insert(key, result);
         result
     })
 }
 
-/// 参与 shaping 的单元：隐藏、空白和越界的单元不会产生字形。
-fn glyph_cells<'a>(
-    columns: usize,
-    cells: impl IntoIterator<Item = &'a TerminalCellPatch>,
-) -> impl Iterator<Item = &'a TerminalCellPatch> {
-    cells
-        .into_iter()
-        .filter(move |cell| cell.column < columns && !cell.hidden && !cell.is_blank())
-}
-
-/// 判断两组单元是否会生成完全相同的字形缓冲。背景色、下划线和删除线只影响实例数据，
-/// 因此不参与比较；前景色保存在 rich-text span 中，变化时必须重建缓冲。
-pub(super) fn same_glyph_content<'a>(
-    columns: usize,
-    previous: impl IntoIterator<Item = &'a TerminalCellPatch>,
-    next: impl IntoIterator<Item = &'a TerminalCellPatch>,
-) -> bool {
-    let key = |cell: &'a TerminalCellPatch| {
-        (
-            cell.column,
-            cell.width_in_columns,
-            cell.bold,
-            cell.italic,
-            cell.foreground,
-            cell.character,
-            cell.zerowidth.as_deref(),
-        )
-    };
-    glyph_cells(columns, previous)
-        .map(key)
-        .eq(glyph_cells(columns, next).map(key))
-}
-
-fn build_text_runs(columns: usize, cells: &[TerminalCellPatch]) -> Vec<TextRun> {
-    let mut runs = Vec::<TextRun>::new();
-    for cell in glyph_cells(columns, cells) {
-        let width = cell.width_in_columns.max(1).min(columns - cell.column);
-        push_grid_run(
-            &mut runs,
-            cell.character,
-            cell.zerowidth.as_deref().unwrap_or(&[]),
-            ShapeStyle {
-                bold: cell.bold,
-                italic: cell.italic,
-            },
-            PaintStyle {
-                foreground: cell.foreground,
-            },
-            cell.column,
-            width,
-        );
-    }
-    runs
-}
-
-#[allow(clippy::too_many_arguments)]
-fn push_grid_run(
-    runs: &mut Vec<TextRun>,
-    character: char,
-    zerowidth: &[char],
-    shape: ShapeStyle,
-    paint: PaintStyle,
-    column: usize,
-    columns: usize,
-) {
-    let mergeable_ascii = columns == 1 && character.is_ascii() && zerowidth.is_empty();
-    let write_text = |text: &mut String| {
-        text.push(character);
-        text.extend(zerowidth);
-    };
-    if let Some(last) = runs.last_mut()
-        && mergeable_ascii
-        && last.mergeable_ascii
-        && last.shape == shape
-        && last.column + last.columns == column
-    {
-        match last.spans.last_mut() {
-            Some(span) if span.paint == paint => write_text(&mut span.text),
-            _ => {
-                let mut text = String::new();
-                write_text(&mut text);
-                last.spans.push(PaintSpan { text, paint });
-            }
-        }
-        last.columns += columns;
-    } else {
-        let mut text = String::with_capacity(4);
-        write_text(&mut text);
-        runs.push(TextRun {
-            spans: vec![PaintSpan { text, paint }],
-            shape,
-            column,
-            columns,
-            mergeable_ascii,
-        });
-    }
-}
-
-fn attrs<'a>(font_family: &'a str, shape: ShapeStyle) -> Attrs<'a> {
-    Attrs::new()
-        .family(Family::Name(font_family))
-        .weight(if shape.bold {
-            Weight::BOLD
-        } else {
-            Weight::NORMAL
-        })
-        .style(if shape.italic {
-            Style::Italic
-        } else {
-            Style::Normal
-        })
-}
-
-fn glyph_color(color: RgbColor) -> GlyphColor {
-    GlyphColor::rgb(color.red, color.green, color.blue)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        GridTextMetrics, baseline_aligned_top, build_text_runs, create_preedit_buffers,
-        same_glyph_content,
-    };
-    use crate::terminal::{RgbColor, TerminalCellPatch};
-    use glyphon::Metrics;
-
-    fn cell(column: usize, character: char, foreground: RgbColor) -> TerminalCellPatch {
+    use super::*;
+    fn cell(column: usize, character: char) -> TerminalCellPatch {
         TerminalCellPatch {
+            column,
             character,
             zerowidth: None,
-            foreground,
+            width_in_columns: 1,
+            foreground: RgbColor {
+                red: 255,
+                green: 255,
+                blue: 255,
+            },
             background: RgbColor {
                 red: 0,
                 green: 0,
                 blue: 0,
             },
-            column,
-            width_in_columns: 1,
             bold: false,
             italic: false,
+            hidden: false,
             underline_style: 0,
             strikeout: false,
-            hidden: false,
         }
     }
-
     #[test]
-    fn foreground_color_becomes_a_paint_span_instead_of_splitting_the_run() {
-        let white = RgbColor {
-            red: 255,
-            green: 255,
-            blue: 255,
-        };
-        let red = RgbColor {
-            red: 255,
-            green: 0,
-            blue: 0,
-        };
-        let runs = build_text_runs(
-            3,
-            &[cell(0, '!', white), cell(1, '=', white), cell(2, 'x', red)],
+    fn ascii_positions_do_not_accumulate_font_advance_at_any_scale() {
+        let mut fs = super::super::fonts::font_system();
+        for family in ["Maple Mono NF CN", "Cascadia Mono", "Consolas"] {
+            for size in [13.0, 16.25, 19.5, 22.75, 26.0, 27.0] {
+                let m = measure_cell(family, size);
+                let grid = GridTextMetrics::new(
+                    Metrics::new(size, m.height as f32),
+                    m.width as f32,
+                    m.height as f32,
+                    family,
+                );
+                let cells: Vec<_> = (0..200).map(|i| cell(i, 'd')).collect();
+                let runs = create_row_buffers(&mut fs, grid, 200, &cells);
+                let glyphs = &runs[0].glyphs;
+                assert_eq!(glyphs.len(), 200);
+                for (i, g) in glyphs.iter().enumerate() {
+                    assert!(
+                        (g.layout.x - glyphs[0].layout.x - i as f32 * m.width as f32).abs() < 0.002,
+                        "{family} {size} col={i}"
+                    );
+                    assert_eq!((g.start_column, g.end_column), (i, i + 1));
+                }
+            }
+        }
+    }
+    #[test]
+    fn unicode_and_combining_cells_share_context_and_keep_column_mapping() {
+        let mut cells = vec![cell(0, 'a'), cell(1, '中'), cell(3, 'e'), cell(4, 'z')];
+        cells[1].width_in_columns = 2;
+        cells[2].zerowidth = Some(vec!['\u{301}'].into_boxed_slice());
+        let mut fs = super::super::fonts::font_system();
+        let runs = create_row_buffers(
+            &mut fs,
+            GridTextMetrics::new(Metrics::new(26.0, 36.0), 16.0, 36.0, "Maple Mono NF CN"),
+            5,
+            &cells,
         );
-
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].text(), "!=x");
-        assert_eq!(runs[0].column, 0);
-        assert_eq!(runs[0].columns, 3);
-        assert_eq!(runs[0].spans.len(), 2);
-        assert_eq!(runs[0].spans[0].text, "!=");
-        assert_eq!(runs[0].spans[1].text, "x");
-        assert_eq!(runs[0].spans[1].paint.foreground, red);
+        assert!(
+            runs[0]
+                .glyphs
+                .iter()
+                .any(|g| (g.start_column, g.end_column) == (1, 3))
+        );
+        assert!(
+            runs[0]
+                .glyphs
+                .iter()
+                .any(|g| (g.start_column, g.end_column) == (3, 4))
+        );
+        assert!(runs[0].glyphs.iter().all(|g| g.end_column <= 5));
     }
-
     #[test]
-    fn bold_changes_split_the_shaping_run() {
-        let white = RgbColor {
-            red: 255,
-            green: 255,
-            blue: 255,
-        };
-        let mut bold = cell(2, 'x', white);
-        bold.bold = true;
-        let runs = build_text_runs(3, &[cell(0, '!', white), cell(1, '=', white), bold]);
-
-        assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0].text(), "!=");
-        assert_eq!(runs[1].text(), "x");
+    fn paint_does_not_split_context_but_font_style_does() {
+        let mut cells = vec![cell(0, '!'), cell(1, '='), cell(2, 'x')];
+        cells[1].foreground.red = 0;
+        assert_eq!(build_text_runs(3, &cells).len(), 1);
+        cells[2].bold = true;
+        assert_eq!(build_text_runs(3, &cells).len(), 2);
     }
-
     #[test]
-    fn background_highlight_does_not_split_a_shaping_run() {
-        let white = RgbColor {
-            red: 255,
-            green: 255,
-            blue: 255,
-        };
-        let mut highlighted = cell(1, '=', white);
-        highlighted.background = RgbColor {
-            red: 255,
-            green: 204,
-            blue: 0,
-        };
-
-        let runs = build_text_runs(2, &[cell(0, '!', white), highlighted]);
-
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].text(), "!=");
-        assert_eq!(runs[0].spans.len(), 1);
-        assert_eq!(runs[0].columns, 2);
-    }
-
-    #[test]
-    fn paint_only_changes_do_not_require_reshaping() {
-        let white = RgbColor {
-            red: 255,
-            green: 255,
-            blue: 255,
-        };
-        let before = [
-            cell(0, 'a', white),
-            cell(1, 'b', white),
-            cell(2, ' ', white),
-        ];
+    fn background_changes_preserve_glyph_content() {
+        let before = vec![cell(0, 'a')];
         let mut after = before.clone();
-        after[1].background = RgbColor {
-            red: 9,
-            green: 9,
-            blue: 9,
-        };
-        after[1].underline_style = 1;
-        after[1].strikeout = true;
-        after[2].hidden = true;
-        assert!(same_glyph_content(3, &before, &after));
-
-        let mut recolored = before.clone();
-        recolored[0].foreground = RgbColor {
-            red: 255,
-            green: 0,
-            blue: 0,
-        };
-        assert!(!same_glyph_content(3, &before, &recolored));
-
-        let mut retyped = before.clone();
-        retyped[1].character = 'c';
-        assert!(!same_glyph_content(3, &before, &retyped));
+        after[0].background.red = 99;
+        after[0].strikeout = true;
+        assert!(same_glyph_content(1, &before, &after));
+        after[0].character = 'b';
+        assert!(!same_glyph_content(1, &before, &after));
     }
-
     #[test]
-    fn wide_and_fallback_cells_keep_explicit_grid_anchors() {
-        let white = RgbColor {
-            red: 255,
-            green: 255,
-            blue: 255,
-        };
-        let mut cjk = cell(1, '中', white);
-        cjk.width_in_columns = 2;
-        let runs = build_text_runs(5, &[cell(0, 'a', white), cjk, cell(3, 'b', white)]);
-
-        assert_eq!(runs.len(), 3);
-        assert_eq!((runs[0].column, runs[0].columns), (0, 1));
-        assert_eq!((runs[1].column, runs[1].columns), (1, 2));
-        assert_eq!((runs[2].column, runs[2].columns), (3, 1));
-    }
-
-    #[test]
-    fn cell_metrics_are_positive_integers_that_grow_with_physical_font_size() {
-        let small = super::measure_cell("monospace", 12.0);
-        let large = super::measure_cell("monospace", 24.0);
-        assert!(small.width >= 1 && small.height >= 1);
-        assert!(large.width > small.width);
-        assert!(large.height > small.height);
-    }
-
-    #[test]
-    fn fallback_metrics_cannot_move_the_terminal_baseline() {
-        let row_top = 40.0;
-        let fixed_baseline = 15.0;
-        let ascii_top = baseline_aligned_top(row_top, fixed_baseline, 14.0);
-        let cjk_top = baseline_aligned_top(row_top, fixed_baseline, 16.5);
-
-        assert_eq!(ascii_top + 14.0, row_top + fixed_baseline);
-        assert_eq!(cjk_top + 16.5, row_top + fixed_baseline);
-    }
-
-    #[test]
-    fn ime_preedit_uses_grapheme_widths_and_grid_anchors() {
-        let mut font_system = super::super::fonts::font_system();
-        let grid = GridTextMetrics::new(Metrics::new(15.0, 20.0), 9.0, 20.0, "monospace");
-        let (runs, columns) = create_preedit_buffers(
-            &mut font_system,
-            grid,
-            10,
-            "A中e\u{301}",
-            RgbColor {
-                red: 255,
-                green: 255,
-                blue: 255,
-            },
+    fn composition_replaces_intersected_wide_cells_without_mutating_terminal() {
+        let mut cells = vec![cell(0, 'a'), cell(1, '中'), cell(3, 'b'), cell(4, 'c')];
+        cells[1].width_in_columns = 2;
+        let original = cells.clone();
+        let (composed, width) = compose_preedit(&cells, 5, 2, "XY", cells[0].foreground);
+        assert_eq!(width, 2);
+        assert_eq!(
+            composed.iter().map(|c| c.character).collect::<String>(),
+            "aXYc"
         );
-
-        assert_eq!(columns, 4);
-        assert_eq!(runs.len(), 3);
-        assert_eq!(runs[0].column, 0);
-        assert_eq!(runs[1].column, 1);
-        assert_eq!(runs[2].column, 3);
+        assert_eq!(cells, original);
+        assert_eq!(
+            compose_preedit(&cells, 5, 2, "", cells[0].foreground).0,
+            original
+        );
+    }
+    #[test]
+    fn composition_never_squeezes_a_wide_grapheme_into_the_last_column() {
+        let cells = vec![cell(0, 'a'), cell(1, 'b')];
+        let (composed, width) = compose_preedit(&cells, 2, 1, "中", cells[0].foreground);
+        assert_eq!(width, 0);
+        assert_eq!(composed, cells);
+    }
+    #[test]
+    fn composition_tracks_grapheme_widths() {
+        let fg = cell(0, 'a').foreground;
+        let (cells, width) = compose_preedit(&[], 10, 0, "A中e\u{301}", fg);
+        assert_eq!(width, 4);
+        assert_eq!(
+            cells.iter().map(|c| c.column).collect::<Vec<_>>(),
+            vec![0, 1, 3]
+        );
+    }
+    #[test]
+    fn ligature_clusters_keep_their_source_columns_and_paint() {
+        // This font is optional on CI; exercise its real ligatures when installed.
+        if !super::super::fonts::monospace_families().any(|f| f == "Maple Mono NF CN") {
+            return;
+        }
+        let mut fs = super::super::fonts::font_system();
+        let mut cells = vec![cell(0, '!'), cell(1, '='), cell(2, 'd')];
+        cells[1].foreground.red = 0;
+        let runs = create_row_buffers(
+            &mut fs,
+            GridTextMetrics::new(Metrics::new(26.0, 36.0), 16.0, 36.0, "Maple Mono NF CN"),
+            3,
+            &cells,
+        );
+        let grid = GridTextMetrics::new(Metrics::new(26.0, 36.0), 16.0, 36.0, "Maple Mono NF CN");
+        let mut isolated = cells.clone();
+        isolated[1].column = 2;
+        isolated[2].column = 4;
+        let isolated = create_row_buffers(&mut fs, grid, 5, &isolated);
+        let ids = |runs: &[ShapedRun]| {
+            runs.iter()
+                .flat_map(|r| r.glyphs.iter().map(|g| g.layout.glyph_id))
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(
+            ids(&runs),
+            ids(&isolated),
+            "contextual ligature substitutions must be retained"
+        );
+        assert!(
+            runs[0]
+                .glyphs
+                .iter()
+                .all(|g| g.start_column < g.end_column && g.end_column <= 3)
+        );
+        assert_ne!(runs[0].cells[0].foreground, runs[0].cells[1].foreground);
     }
 }

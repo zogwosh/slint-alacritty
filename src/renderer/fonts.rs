@@ -1,6 +1,6 @@
 //! 进程内唯一的系统字体库；扫描系统字体代价很高，所有 FontSystem 都从这里克隆。
 
-use glyphon::{FontSystem, fontdb};
+use cosmic_text::{FontSystem, fontdb};
 use std::sync::OnceLock;
 
 static SYSTEM_FONTS: OnceLock<fontdb::Database> = OnceLock::new();

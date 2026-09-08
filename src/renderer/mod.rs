@@ -1,8 +1,11 @@
-//! GPU 终端渲染器：WGPU 绘制单元背景/装饰，glyphon 负责字形排版与缓存。
+//! GPU 终端渲染器：WGPU 绘制单元背景/装饰，项目代码负责网格排版和字形图集。
 
 mod decoration;
 mod fonts;
+mod glyphs;
 mod grid;
+#[cfg(test)]
+mod render_tests;
 mod resources;
 mod stats;
 mod text;
@@ -12,18 +15,13 @@ pub(crate) use text::measure_cell;
 
 use self::decoration::DecorationLayer;
 use self::resources::{
-    CellInstance, TEXTURE_FORMAT, clear_color, create_cell_pipeline, create_instance_buffer,
-    create_texture,
+    CellInstance, clear_color, create_cell_pipeline, create_instance_buffer, create_texture,
 };
 use self::stats::PerfStats;
 use crate::terminal::{FramePatch, TerminalTheme};
-use glyphon::{
-    Cache, Color as GlyphColor, ColorMode, FontSystem, Resolution, SwashCache, TextArea, TextAtlas,
-    TextBounds, TextRenderer, Viewport,
-};
+use cosmic_text::{FontSystem, SwashCache};
 use slint::wgpu_29::wgpu;
 use std::time::Instant;
-use unicode_width::UnicodeWidthStr;
 
 /// 渲染器内部保存的光标快照。
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -38,7 +36,7 @@ struct CursorState {
 /// IME 预编辑只保存文本和终端网格位置；字形仍走与终端正文相同的 shaping/atlas 管线。
 struct ImePreedit {
     text: String,
-    buffers: Vec<text::TextRunBuffer>,
+    buffers: Vec<text::ShapedRun>,
     column: usize,
     row: usize,
     columns: usize,
@@ -74,11 +72,9 @@ pub(crate) struct GpuTerminalRenderer {
     cell_pipeline: wgpu::RenderPipeline,
     font_system: FontSystem,
     swash_cache: SwashCache,
-    glyph_viewport: Viewport,
-    glyph_atlas: TextAtlas,
-    glyph_renderer: TextRenderer,
-    /// ASCII 连字以连续 run 缓存；fallback/宽字符 run 保留明确的网格列锚点。
-    text_rows: Vec<Vec<text::TextRunBuffer>>,
+    glyph_renderer: glyphs::GlyphRenderer,
+    /// Shaped glyph clusters carry explicit terminal grid coordinates.
+    text_rows: Vec<Vec<text::ShapedRun>>,
     /// 字体或 DPI 改变时可直接重建 shaping，无需等待 PTY 重发完整帧。
     row_cells: Vec<Vec<crate::terminal::TerminalCellPatch>>,
     ime_preedit: Option<ImePreedit>,
@@ -149,16 +145,7 @@ impl GpuTerminalRenderer {
         let fixed_baseline =
             text::measure_fixed_baseline(&mut font_system, font_family, font_size, cell_height);
 
-        let cache = Cache::new(&device);
-        let glyph_viewport = Viewport::new(&device, &cache);
-        let mut glyph_atlas =
-            TextAtlas::with_color_mode(&device, &queue, &cache, TEXTURE_FORMAT, ColorMode::Web);
-        let glyph_renderer = TextRenderer::new(
-            &mut glyph_atlas,
-            &device,
-            wgpu::MultisampleState::default(),
-            None,
-        );
+        let glyph_renderer = glyphs::GlyphRenderer::new(&device);
 
         let mut renderer = Self {
             device,
@@ -185,8 +172,6 @@ impl GpuTerminalRenderer {
             cell_pipeline,
             font_system,
             swash_cache: SwashCache::new(),
-            glyph_viewport,
-            glyph_atlas,
             glyph_renderer,
             text_rows: Vec::new(),
             row_cells: Vec::new(),
@@ -419,90 +404,26 @@ impl GpuTerminalRenderer {
             return;
         }
         let full_surface = dirty_rows.len() == self.rows;
-        self.glyph_viewport.update(
-            &self.queue,
-            Resolution {
-                width: self.width,
-                height: self.height,
-            },
-        );
-
-        // 正文与 IME 都使用固定终端基线；每个 TextArea 只允许在自己的网格行内绘制。
-        let mut text_areas = Vec::new();
-        for &row in &dirty_rows {
-            let row_top = row as f32 * self.cell_height;
-            for text_run in self.text_rows.get(row).into_iter().flatten() {
-                text_areas.push(TextArea {
-                    buffer: &text_run.buffer,
-                    left: text_run.column() as f32 * self.cell_width + text_run.x_offset(),
-                    top: text::baseline_aligned_top(
-                        row_top,
-                        self.fixed_baseline,
-                        text_run.baseline(),
-                    ),
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: row_top.floor().max(0.0) as i32,
-                        right: self.width as i32,
-                        bottom: (row_top + self.cell_height).ceil().min(self.height as f32) as i32,
-                    },
-                    default_color: GlyphColor::rgb(
-                        self.theme.foreground.red,
-                        self.theme.foreground.green,
-                        self.theme.foreground.blue,
-                    ),
-                    custom_glyphs: &[],
-                });
-            }
-        }
-        if let Some(ime) = &self.ime_preedit
-            && dirty_rows.binary_search(&ime.row).is_ok()
-        {
-            let row_top = ime.row as f32 * self.cell_height;
-            for text_run in &ime.buffers {
-                text_areas.push(TextArea {
-                    buffer: &text_run.buffer,
-                    left: (ime.column + text_run.column()) as f32 * self.cell_width
-                        + text_run.x_offset(),
-                    top: text::baseline_aligned_top(
-                        row_top,
-                        self.fixed_baseline,
-                        text_run.baseline(),
-                    ),
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: (ime.column as f32 * self.cell_width).floor().max(0.0) as i32,
-                        top: row_top.floor().max(0.0) as i32,
-                        right: self.width as i32,
-                        bottom: (row_top + self.cell_height).ceil().min(self.height as f32) as i32,
-                    },
-                    default_color: GlyphColor::rgb(
-                        self.theme.foreground.red,
-                        self.theme.foreground.green,
-                        self.theme.foreground.blue,
-                    ),
-                    custom_glyphs: &[],
-                });
-            }
-        }
-        // 字形准备失败（如图集耗尽）时仍然提交背景与光标，并把这些行留到下一帧重试；
-        // 绝不能让渲染器停在“永远待渲染”的状态。
-        let glyphs_ready = match self.glyph_renderer.prepare(
+        self.glyph_renderer.prepare(
             &self.device,
             &self.queue,
             &mut self.font_system,
-            &mut self.glyph_atlas,
-            &self.glyph_viewport,
-            text_areas,
             &mut self.swash_cache,
-        ) {
-            Ok(()) => true,
-            Err(error) => {
-                eprintln!("terminal glyph preparation failed: {error}");
-                false
-            }
-        };
+            dirty_rows
+                .iter()
+                .filter(|&&row| row < self.rows)
+                .map(|&row| {
+                    let runs = self
+                        .ime_preedit
+                        .as_ref()
+                        .filter(|ime| ime.row == row)
+                        .map_or(self.text_rows[row].as_slice(), |ime| ime.buffers.as_slice());
+                    (row, runs)
+                }),
+            (self.width, self.height),
+            (self.cell_width, self.cell_height),
+            self.fixed_baseline,
+        );
         // 光标只能随其所在行一起重绘；用 Load 叠加半透明光标会逐帧累积 alpha。
         let cursor_row_dirty = dirty_rows.binary_search(&self.cursor.row).is_ok();
 
@@ -556,13 +477,7 @@ impl GpuTerminalRenderer {
                 pass.set_vertex_buffer(0, self.ime_instance_buffer.slice(..));
                 pass.draw(0..6, 0..1);
             }
-            if glyphs_ready
-                && let Err(error) =
-                    self.glyph_renderer
-                        .render(&self.glyph_atlas, &self.glyph_viewport, &mut pass)
-            {
-                eprintln!("terminal glyph rendering failed: {error}");
-            }
+            self.glyph_renderer.render(&mut pass);
             if cursor_row_dirty
                 && self.cursor.visible
                 && (!self.cursor.blinking || self.cursor_phase)
@@ -574,15 +489,10 @@ impl GpuTerminalRenderer {
             }
         }
         self.queue.submit(Some(encoder.finish()));
-        self.glyph_atlas.trim();
         self.clear_pending = false;
         self.render_pending = false;
         self.stats
             .record_render(full_surface, dirty_rows.len(), started.elapsed());
-        if !glyphs_ready {
-            self.dirty_rows = dirty_rows;
-            self.render_pending = true;
-        }
     }
 
     /// 推进闪烁相位；返回 true 表示调用方需要请求一次窗口重绘。
@@ -601,6 +511,7 @@ impl GpuTerminalRenderer {
         let previous_row = self.ime_preedit.as_ref().map(|ime| ime.row);
         if value.is_empty() || !self.cursor.visible || self.cursor.row >= self.rows {
             self.ime_preedit = None;
+            self.update_cursor_buffer();
             self.queue.write_buffer(
                 &self.ime_instance_buffer,
                 0,
@@ -615,24 +526,21 @@ impl GpuTerminalRenderer {
 
         let column = self.cursor.column.min(self.columns.saturating_sub(1));
         let row = self.cursor.row;
-        let available_columns = self.columns.saturating_sub(column).max(1);
-        let metrics = glyphon::Metrics::new(self.font_size, self.cell_height);
+        let metrics = cosmic_text::Metrics::new(self.font_size, self.cell_height);
         let grid = text::GridTextMetrics::new(
             metrics,
             self.cell_width,
             self.cell_height,
             &self.font_family,
         );
-        let (buffers, columns) = text::create_preedit_buffers(
-            &mut self.font_system,
-            grid,
-            available_columns,
+        let (cells, columns) = text::compose_preedit(
+            &self.row_cells[row],
+            self.columns,
+            column,
             value,
             self.theme.foreground,
         );
-        if buffers.is_empty() {
-            return false;
-        }
+        let buffers = text::create_row_buffers(&mut self.font_system, grid, self.columns, &cells);
         self.ime_preedit = Some(ImePreedit {
             text: value.to_owned(),
             buffers,
@@ -645,23 +553,15 @@ impl GpuTerminalRenderer {
         }
         self.dirty_rows.push(row);
         self.update_ime_buffer();
+        self.update_cursor_buffer();
         self.render_pending = true;
         true
     }
 
     fn relocate_ime_to_cursor(&mut self) {
-        let Some(ime) = self.ime_preedit.as_mut() else {
-            return;
-        };
-        let previous_row = ime.row;
-        ime.column = self.cursor.column.min(self.columns.saturating_sub(1));
-        ime.row = self.cursor.row.min(self.rows.saturating_sub(1));
-        ime.columns = UnicodeWidthStr::width(ime.text.as_str())
-            .max(1)
-            .min(self.columns.saturating_sub(ime.column).max(1));
-        self.dirty_rows.push(previous_row);
-        self.dirty_rows.push(ime.row);
-        self.update_ime_buffer();
+        if let Some(text) = self.ime_preedit.as_ref().map(|ime| ime.text.clone()) {
+            self.set_ime_preedit(&text);
+        }
     }
 
     fn update_ime_buffer(&self) {
@@ -675,7 +575,7 @@ impl GpuTerminalRenderer {
                     ime.columns as f32 * self.cell_width,
                     self.cell_height,
                 ],
-                background: resources::rgba(self.theme.background, 0.0),
+                background: resources::rgba(self.theme.background, 1.0),
                 foreground: resources::rgba(self.theme.foreground, 1.0),
                 flags: [1, 0, 0, 0],
             });

@@ -4,7 +4,7 @@ use crate::terminal::{RgbColor, RgbaColor};
 use bytemuck::{Pod, Zeroable};
 use slint::wgpu_29::wgpu;
 
-/// 单元颜色与 glyphon（ColorMode::Web）都把 sRGB 字节原样当作输出值，因此目标必须是
+/// 单元颜色与字形图集都把 sRGB 字节原样当作输出值，因此目标必须是
 /// 非 sRGB 格式；Slint 的交换链同样是非 sRGB，整条链路不做任何伽马变换。
 pub(super) const TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -67,7 +67,9 @@ pub(super) fn create_texture(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: TEXTURE_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

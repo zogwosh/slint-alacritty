@@ -6,10 +6,10 @@ use super::{
     text,
 };
 use crate::terminal::TerminalCellPatch;
-use glyphon::Metrics;
+use cosmic_text::Metrics;
 
 impl GpuTerminalRenderer {
-    /// 每行保存少量网格锚定 run；ASCII 连字连续成组，宽字符保持独立列锚点。
+    /// 每行缓存按字体样式分组的字形簇，每个簇携带明确的网格列位置。
     pub(super) fn rebuild_text_rows(&mut self) {
         self.text_rows = std::iter::repeat_with(Vec::new).take(self.rows).collect();
         self.row_cells = std::iter::repeat_with(Vec::new).take(self.rows).collect();
@@ -30,25 +30,8 @@ impl GpuTerminalRenderer {
     }
 
     pub(super) fn update_row_metrics(&mut self) {
-        let metrics = Metrics::new(self.font_size, self.cell_height);
-        for run in self.text_rows.iter_mut().flatten() {
-            run.update_metrics(
-                &mut self.font_system,
-                metrics,
-                self.cell_width,
-                self.cell_height,
-            );
-        }
-        if let Some(ime) = self.ime_preedit.as_mut() {
-            for run in &mut ime.buffers {
-                run.update_metrics(
-                    &mut self.font_system,
-                    metrics,
-                    self.cell_width,
-                    self.cell_height,
-                );
-            }
-        }
+        self.rebuild_all_text_rows();
+        self.relocate_ime_to_cursor();
     }
 
     /// 根据新的单元尺寸重算已有实例矩形，而不改变其中的颜色和样式。
@@ -145,15 +128,23 @@ impl GpuTerminalRenderer {
 
     /// 光标所在单元占据的列数；落在宽字符上时光标要覆盖两格。
     fn cursor_width_in_columns(&self) -> usize {
-        self.row_cells
-            .get(self.cursor.row)
-            .and_then(|cells| {
-                let index = cells.partition_point(|cell| cell.column < self.cursor.column);
+        let composed = self
+            .ime_preedit
+            .as_ref()
+            .filter(|ime| ime.row == self.cursor.row);
+        let cell = if let Some(ime) = composed {
+            ime.buffers
+                .iter()
+                .flat_map(|run| run.cells.iter())
+                .find(|cell| cell.column == self.cursor.column)
+        } else {
+            self.row_cells.get(self.cursor.row).and_then(|cells| {
                 cells
-                    .get(index)
+                    .get(cells.partition_point(|cell| cell.column < self.cursor.column))
                     .filter(|cell| cell.column == self.cursor.column)
             })
-            .map_or(1, |cell| cell.width_in_columns.max(1))
+        };
+        cell.map_or(1, |cell| cell.width_in_columns.max(1))
             .min(self.columns.saturating_sub(self.cursor.column).max(1))
     }
 
@@ -227,11 +218,8 @@ pub(super) fn merge_row_patch(
         cell_end > start_column && cell.column < end_column
     };
     // 只有被替换区间内的字形内容才可能变化，比较前无需构造整行副本。
-    let glyphs_changed = !text::same_glyph_content(
-        columns,
-        cached.iter().filter(|cell| overlaps(cell)),
-        cells,
-    );
+    let glyphs_changed =
+        !text::same_glyph_content(columns, cached.iter().filter(|cell| overlaps(cell)), cells);
     cached.retain(|cell| !overlaps(cell));
     let insert_at = cached.partition_point(|cell| cell.column < start_column);
     cached.splice(insert_at..insert_at, cells.iter().cloned());
@@ -287,7 +275,11 @@ mod tests {
         assert_eq!(changed, Ok(true));
         let text = cached.iter().map(|cell| cell.character).collect::<String>();
         assert_eq!(text, "axc");
-        assert!(cached.windows(2).all(|pair| pair[0].column < pair[1].column));
+        assert!(
+            cached
+                .windows(2)
+                .all(|pair| pair[0].column < pair[1].column)
+        );
     }
 
     #[test]
@@ -310,7 +302,10 @@ mod tests {
             green: 2,
             blue: 3,
         };
-        assert_eq!(merge_row_patch(1, &mut cached, 0, 1, &[recolored]), Ok(false));
+        assert_eq!(
+            merge_row_patch(1, &mut cached, 0, 1, &[recolored]),
+            Ok(false)
+        );
         assert_eq!(cached[0].background.red, 1);
     }
 
